@@ -624,8 +624,11 @@ void ossl_quic_tx_packetiser_free(OSSL_QUIC_TX_PACKETISER *txp)
  * We choose 160 bytes as the required margin, which is double the rough
  * estimation of the minimum we would require to guarantee forward progress
  * under worst case packet overheads.
+ *
+ * TXP_REQUIRED_TOKEN_MARGIN is in quic_txp.h so that callers which accept a
+ * token from an application can reject an oversized one up front, rather than
+ * leaving it to fail here once the connection is already being started.
  */
-#define TXP_REQUIRED_TOKEN_MARGIN 160
 
 static int txp_check_token_len(size_t token_len, size_t mdpl)
 {

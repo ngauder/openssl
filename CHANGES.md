@@ -29,6 +29,19 @@ OpenSSL Releases
 
 -----------
 
+### Local changes on top of 4.0.1
+
+ * Added `SSL_set_quic_retry_replay()`, which puts a QUIC client connection into
+   the state it would have reached after receiving a Retry, using a token and
+   connection IDs harvested from an earlier connection. This allows a
+   measurement to test whether a server honours the requirement in RFC 9000
+   section 8.1.4 that an address validation token be accepted only from the
+   client address it was issued to.
+
+   *Nikolas Gauder*
+
+-----------
+
 ### Changes between 4.0.0 and 4.0.1 [9 Jun 2026]
 
  * Fixed heap use-after-free in `PKCS7_verify()`.

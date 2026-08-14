@@ -21,6 +21,7 @@
 #include "../ssl/ssl_local.h"
 #include "../ssl/quic/quic_channel_local.h"
 #include "internal/quic_error.h"
+#include "internal/quic_wire_pkt.h"
 
 static OSSL_LIB_CTX *libctx = NULL;
 static char *propq = NULL;
@@ -2599,6 +2600,360 @@ err:
 }
 
 /*
+ * Retry token replay.
+ *
+ * A listener validates addresses unless told otherwise, so it answers a first
+ * Initial with a Retry. This watches the datagrams to collect the three values
+ * a Retry token cannot be replayed without -- the token, the Retry's source
+ * connection ID, and the destination connection ID the client used in the
+ * Initial that drew it -- and then checks that arming a fresh connection with
+ * them produces the packet a client would send after a Retry.
+ *
+ * What is deliberately not asserted here is a server accepting the replayed
+ * token, because this harness cannot set that up: a listener binds a channel
+ * to the Retry's connection ID as soon as the harvesting client uses the
+ * token, and from then on an Initial carrying that connection ID is routed to
+ * that channel rather than treated as a new connection. Harvesting without
+ * using the token needs the client and the replay to be separate UDP sockets,
+ * which the memory BIO pair here cannot provide. Acceptance is covered end to
+ * end against a real server instead.
+ */
+#define RETRY_MAX_TOKEN 512
+
+struct retry_capture {
+    unsigned char odcid[QUIC_MAX_CONN_ID_LEN];  /* DCID of our first Initial */
+    size_t odcid_len;
+    unsigned char scid[QUIC_MAX_CONN_ID_LEN];   /* SCID of the Retry */
+    size_t scid_len;
+    unsigned char token[RETRY_MAX_TOKEN];
+    size_t token_len;
+    unsigned char sent_dcid[QUIC_MAX_CONN_ID_LEN]; /* DCID of the last Initial */
+    size_t sent_dcid_len;
+    unsigned char sent_token[RETRY_MAX_TOKEN];  /* token we put on the wire */
+    size_t sent_token_len;
+    /*
+     * The same two for the first Initial only. A client that receives a Retry
+     * sends a second Initial carrying the server's token, so a check that a
+     * connection started without one has to look at the first packet rather
+     * than the most recent.
+     */
+    unsigned char first_token[RETRY_MAX_TOKEN];
+    size_t first_token_len;
+    int have_first;
+    int saw_retry;
+};
+
+static void retry_capture_cb(int write_p, int version, int content_type,
+                             const void *buf, size_t len, SSL *ssl, void *arg)
+{
+    struct retry_capture *c = arg;
+    const unsigned char *d = buf;
+    size_t p, n, k;
+    uint64_t tlen;
+    unsigned char dcil, scil;
+
+    if (content_type != SSL3_RT_QUIC_DATAGRAM || len < 7 || (d[0] & 0x80) == 0)
+        return;
+
+    /* only v1 is spoken here, so Initial is type 0 and Retry is type 3 */
+    if (d[1] != 0 || d[2] != 0 || d[3] != 0 || d[4] != 1)
+        return;
+
+    p = 5;
+    dcil = d[p++];
+    if (dcil > QUIC_MAX_CONN_ID_LEN || len - p < dcil)
+        return;
+
+    if (write_p) {
+        if (((d[0] & 0x30) >> 4) != 0)
+            return;
+
+        /* the first Initial we send: its DCID is what a token is issued against */
+        if (c->odcid_len == 0) {
+            memcpy(c->odcid, d + p, dcil);
+            c->odcid_len = dcil;
+        }
+
+        /* and every Initial: what we most recently put on the wire */
+        memcpy(c->sent_dcid, d + p, dcil);
+        c->sent_dcid_len = dcil;
+
+        p += dcil;
+        if (p >= len)
+            return;
+        scil = d[p++];
+        if (scil > QUIC_MAX_CONN_ID_LEN || len - p < scil)
+            return;
+        p += scil;
+
+        if (p >= len)
+            return;
+        n = (size_t)1 << (d[p] >> 6);
+        if (len - p < n)
+            return;
+        tlen = d[p] & 0x3f;
+        for (k = 1; k < n; k++)
+            tlen = (tlen << 8) | d[p + k];
+        p += n;
+
+        c->sent_token_len = 0;
+        if (tlen > 0 && tlen <= sizeof(c->sent_token) && len - p >= tlen) {
+            memcpy(c->sent_token, d + p, (size_t)tlen);
+            c->sent_token_len = (size_t)tlen;
+        }
+
+        if (!c->have_first) {
+            memcpy(c->first_token, c->sent_token, c->sent_token_len);
+            c->first_token_len = c->sent_token_len;
+            c->have_first = 1;
+        }
+        return;
+    }
+
+    if (((d[0] & 0x30) >> 4) != 3 || c->saw_retry)
+        return;
+
+    p += dcil;
+    if (p >= len)
+        return;
+    scil = d[p++];
+    if (scil == 0 || scil > QUIC_MAX_CONN_ID_LEN || len - p < scil)
+        return;
+    memcpy(c->scid, d + p, scil);
+    c->scid_len = scil;
+    p += scil;
+
+    /* a Retry runs to the end of the datagram: token, then a 16 byte tag */
+    if (len - p <= QUIC_RETRY_INTEGRITY_TAG_LEN)
+        return;
+    c->token_len = len - p - QUIC_RETRY_INTEGRITY_TAG_LEN;
+    if (c->token_len > sizeof(c->token))
+        return;
+    memcpy(c->token, d + p, c->token_len);
+    c->saw_retry = 1;
+}
+
+/*
+ * Bring up a listener acting as a server and a listener to make client
+ * connections from, joined by a datagram BIO pair. ports must differ between
+ * calls so that two of these can coexist.
+ */
+static int retry_pair_up(SSL_CTX **lctx, SSL_CTX **sctx, SSL **qlistener,
+                         SSL **qserver, BIO_ADDR **saddr, short int lport,
+                         short int sport)
+{
+    BIO *lbio = NULL, *sbio = NULL;
+    BIO_ADDR *addr = NULL;
+    struct in_addr ina;
+    int ret = 0;
+
+    ina.s_addr = htonl(0x1f000001);
+    *lctx = *sctx = NULL;
+    *qlistener = *qserver = NULL;
+    *saddr = NULL;
+
+    if (!TEST_ptr(*lctx = create_server_ctx())
+        || !TEST_ptr(*sctx = create_server_ctx())
+        || !TEST_true(BIO_new_bio_dgram_pair(&lbio, 0, &sbio, 0)))
+        goto err;
+
+    /* BIO_dgram_set0_local_addr takes the address, so it is not freed here */
+    if (!TEST_ptr(addr = create_addr(&ina, lport))
+        || !TEST_true(bio_addr_bind(lbio, addr)))
+        goto err;
+    addr = NULL;
+
+    if (!TEST_ptr(addr = create_addr(&ina, sport))
+        || !TEST_true(bio_addr_bind(sbio, addr)))
+        goto err;
+    addr = NULL;
+
+    *qlistener = ql_create(*lctx, lbio);
+    lbio = NULL;
+    *qserver = ql_create(*sctx, sbio);
+    sbio = NULL;
+    if (!TEST_ptr(*qlistener) || !TEST_ptr(*qserver)
+        || !TEST_ptr(*saddr = create_addr(&ina, sport)))
+        goto err;
+
+    return 1;
+err:
+    BIO_free(lbio);
+    BIO_free(sbio);
+    BIO_ADDR_free(addr);
+    return ret;
+}
+
+static int test_quic_retry_replay(void)
+{
+    SSL_CTX *lctx = NULL, *sctx = NULL, *lctx2 = NULL, *sctx2 = NULL;
+    SSL *qlistener = NULL, *qserver = NULL;
+    SSL *qlistener2 = NULL, *qserver2 = NULL;
+    SSL *qconn = NULL, *qconn2 = NULL, *qconn3 = NULL;
+    struct retry_capture cap, cap2, cap3;
+    BIO_ADDR *addr = NULL, *addr2 = NULL;
+    int testresult = 0, chk, i;
+
+    memset(&cap, 0, sizeof(cap));
+    memset(&cap2, 0, sizeof(cap2));
+    memset(&cap3, 0, sizeof(cap3));
+
+    if (!TEST_true(retry_pair_up(&lctx, &sctx, &qlistener, &qserver, &addr,
+                                 8040, 4080)))
+        goto err;
+
+    /* first connection: watch it, and collect what the Retry carried */
+    if (!TEST_ptr(qconn = SSL_new_from_listener(qlistener, 0))
+        || !TEST_true(qc_init(qconn, addr)))
+        goto err;
+
+    SSL_set_msg_callback(qconn, retry_capture_cb);
+    SSL_set_msg_callback_arg(qconn, &cap);
+
+    while ((chk = SSL_do_handshake(qconn)) == -1) {
+        SSL_handle_events(qserver);
+        SSL_handle_events(qlistener);
+    }
+    if (!TEST_int_gt(chk, 0))
+        goto err;
+
+    /*
+     * If the listener did not send a Retry there is nothing to replay and
+     * everything below would pass vacuously.
+     */
+    if (!TEST_true(cap.saw_retry)
+        || !TEST_size_t_gt(cap.token_len, 0)
+        || !TEST_size_t_gt(cap.odcid_len, 0)
+        || !TEST_size_t_gt(cap.scid_len, 0))
+        goto err;
+
+    /*
+     * A client that received the Retry itself switched to the Retry's SCID and
+     * carried the token, so the capture of our own last Initial is also the
+     * statement of what a replay has to reproduce.
+     */
+    if (!TEST_mem_eq(cap.sent_dcid, cap.sent_dcid_len, cap.scid, cap.scid_len)
+        || !TEST_mem_eq(cap.sent_token, cap.sent_token_len,
+                        cap.token, cap.token_len))
+        goto err;
+
+    /*
+     * Replay against a second, independent listener. Its address validation
+     * key is its own, so it cannot accept a token the first one minted -- but
+     * it will only answer with a Retry at all if our Initial passed its AEAD
+     * check first, and that check uses keys derived from the connection ID in
+     * our header. So a Retry back is what says the Initial secrets came from
+     * the Retry SCID rather than the original DCID, which is the part of this
+     * that would otherwise fail silently.
+     */
+    if (!TEST_true(retry_pair_up(&lctx2, &sctx2, &qlistener2, &qserver2,
+                                 &addr2, 8042, 4082)))
+        goto err;
+
+    if (!TEST_ptr(qconn2 = SSL_new_from_listener(qlistener2, 0))
+        || !TEST_true(qc_init(qconn2, addr2))
+        || !TEST_true(SSL_set_quic_retry_replay(qconn2,
+                                                cap.token, cap.token_len,
+                                                cap.odcid, cap.odcid_len,
+                                                cap.scid, cap.scid_len,
+                                                SSL_QUIC_RETRY_REPLAY_RELAX_TP)))
+        goto err;
+
+    SSL_set_msg_callback(qconn2, retry_capture_cb);
+    SSL_set_msg_callback_arg(qconn2, &cap2);
+
+    for (i = 0; i < 64 && !cap2.saw_retry; i++) {
+        if ((chk = SSL_do_handshake(qconn2)) != -1)
+            break;
+        SSL_handle_events(qserver2);
+        SSL_handle_events(qlistener2);
+    }
+
+    /* the token and connection ID we were told to use are the ones sent */
+    if (!TEST_mem_eq(cap2.odcid, cap2.odcid_len, cap.scid, cap.scid_len)
+        || !TEST_mem_eq(cap2.first_token, cap2.first_token_len,
+                        cap.token, cap.token_len))
+        goto err;
+
+    /* and the server answered, so the packet was decryptable and rejected */
+    if (!TEST_true(cap2.saw_retry)) {
+        TEST_info("no reply to the replayed Initial: it was not decryptable");
+        goto err;
+    }
+
+    /*
+     * Without arming, the same client sends neither the token nor that
+     * connection ID, so the checks above are not passing for some reason
+     * unrelated to what was asked for.
+     */
+    if (!TEST_ptr(qconn3 = SSL_new_from_listener(qlistener2, 0))
+        || !TEST_true(qc_init(qconn3, addr2)))
+        goto err;
+
+    SSL_set_msg_callback(qconn3, retry_capture_cb);
+    SSL_set_msg_callback_arg(qconn3, &cap3);
+
+    for (i = 0; i < 8 && !cap3.have_first; i++) {
+        if ((chk = SSL_do_handshake(qconn3)) != -1)
+            break;
+        SSL_handle_events(qserver2);
+        SSL_handle_events(qlistener2);
+    }
+
+    if (!TEST_true(cap3.have_first)
+        || !TEST_size_t_eq(cap3.first_token_len, 0)
+        || !TEST_false(cap3.odcid_len == cap.scid_len
+                       && memcmp(cap3.odcid, cap.scid, cap.scid_len) == 0))
+        goto err;
+
+    /*
+     * The setter validates rather than trusting the caller: nothing further
+     * down bounds a connection ID length, and QUIC_CONN_ID holds a fixed 20
+     * byte array.
+     */
+    if (!TEST_false(SSL_set_quic_retry_replay(qconn3, cap.token, cap.token_len,
+                                              cap.odcid, 4, cap.scid,
+                                              cap.scid_len, 0))
+        || !TEST_false(SSL_set_quic_retry_replay(qconn3, cap.token,
+                                                 cap.token_len, cap.odcid,
+                                                 QUIC_MAX_CONN_ID_LEN + 1,
+                                                 cap.scid, cap.scid_len, 0))
+        || !TEST_false(SSL_set_quic_retry_replay(qconn3, cap.token,
+                                                 cap.token_len, cap.odcid,
+                                                 cap.odcid_len, cap.scid,
+                                                 QUIC_MAX_CONN_ID_LEN + 1, 0))
+        || !TEST_false(SSL_set_quic_retry_replay(qconn3, cap.token, 0,
+                                                 cap.odcid, cap.odcid_len,
+                                                 cap.scid, cap.scid_len, 0))
+        || !TEST_false(SSL_set_quic_retry_replay(qconn3, NULL, cap.token_len,
+                                                 cap.odcid, cap.odcid_len,
+                                                 cap.scid, cap.scid_len, 0))
+        || !TEST_false(SSL_set_quic_retry_replay(qconn3, cap.token,
+                                                 cap.token_len, cap.odcid,
+                                                 cap.odcid_len, cap.scid,
+                                                 cap.scid_len, 0xff)))
+        goto err;
+
+    testresult = 1;
+err:
+    SSL_free(qconn);
+    SSL_free(qconn2);
+    SSL_free(qconn3);
+    SSL_free(qlistener);
+    SSL_free(qserver);
+    SSL_free(qlistener2);
+    SSL_free(qserver2);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(lctx);
+    SSL_CTX_free(sctx2);
+    SSL_CTX_free(lctx2);
+    BIO_ADDR_free(addr);
+    BIO_ADDR_free(addr2);
+
+    return testresult;
+}
+
+/*
  * Verify that the SSL* received in the info callback after SSL_new_from_listener
  * is the outer QUIC connection object, not the inner TLS SSL.
  */
@@ -3645,6 +4000,7 @@ int setup_tests(void)
     ADD_ALL_TESTS(test_quic_set_fd, 3);
     ADD_TEST(test_bio_ssl);
     ADD_TEST(test_ssl_listen_ex);
+    ADD_TEST(test_quic_retry_replay);
     ADD_TEST(test_ssl_client_as_ossl_quic_method);
     ADD_TEST(test_back_pressure);
     ADD_TEST(test_multiple_dgrams);

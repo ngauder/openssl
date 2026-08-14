@@ -159,6 +159,19 @@ struct quic_channel_st {
      */
     QUIC_CONN_ID retry_scid;
 
+    /*
+     * Client only: a Retry token harvested from an earlier connection, to be
+     * replayed on this one, with the connection IDs it was issued against.
+     * Owned by the channel and freed in ch_cleanup(); the TX packetiser is
+     * given the pointer with a NULL free callback, and is torn down first.
+     * NULL means no replay is armed.
+     */
+    unsigned char *retry_replay_token;
+    size_t retry_replay_token_len;
+    QUIC_CONN_ID retry_replay_odcid;
+    QUIC_CONN_ID retry_replay_scid;
+    uint64_t retry_replay_flags;
+
     /* Server only: The DCID we currently expect the peer to use to talk to us. */
     QUIC_CONN_ID cur_local_cid;
 

@@ -429,6 +429,8 @@ static void ch_cleanup(QUIC_CHANNEL *ch)
     OSSL_ERR_STATE_free(ch->err_state);
     OPENSSL_free(ch->ack_range_scratch);
     OPENSSL_free(ch->pending_new_token);
+    /* Safe here: the TXP, which held a borrowed pointer, is freed above. */
+    OPENSSL_free(ch->retry_replay_token);
 
     if (ch->on_port_list) {
         ossl_list_ch_remove(&ch->port->channel_list, ch);
@@ -535,6 +537,30 @@ int ossl_quic_channel_set_peer_addr(QUIC_CHANNEL *ch, const BIO_ADDR *peer_addr)
     }
     ch->addressed_mode = 1;
 
+    return 1;
+}
+
+int ossl_quic_channel_set_retry_replay(QUIC_CHANNEL *ch,
+                                       const unsigned char *token,
+                                       size_t token_len,
+                                       const QUIC_CONN_ID *odcid,
+                                       const QUIC_CONN_ID *retry_scid,
+                                       uint64_t flags)
+{
+    unsigned char *copy;
+
+    if (ch->is_server || ch->state != QUIC_CHANNEL_STATE_IDLE)
+        return 0;
+
+    if ((copy = OPENSSL_memdup(token, token_len)) == NULL)
+        return 0;
+
+    OPENSSL_free(ch->retry_replay_token);
+    ch->retry_replay_token = copy;
+    ch->retry_replay_token_len = token_len;
+    ch->retry_replay_odcid = *odcid;
+    ch->retry_replay_scid = *retry_scid;
+    ch->retry_replay_flags = flags;
     return 1;
 }
 
@@ -1352,6 +1378,20 @@ static uint64_t min_u64_ignore_0(uint64_t a, uint64_t b)
     return a < b ? a : b;
 }
 
+/*
+ * Whether a disagreement between the server's connection-ID transport
+ * parameters and the Retry state we replayed should be tolerated. A server
+ * that validates a replayed token but reconstructs the original DCID
+ * differently, or classifies the token NEW_TOKEN-style and so sends no
+ * retry_source_connection_id, has still established the connection -- which
+ * for a measurement is the observation, not a reason to tear it down.
+ */
+static int ch_retry_replay_relax_tp(const QUIC_CHANNEL *ch)
+{
+    return ch->retry_replay_token != NULL
+        && (ch->retry_replay_flags & SSL_QUIC_RETRY_REPLAY_RELAX_TP) != 0;
+}
+
 static int ch_on_transport_params(const unsigned char *params,
     size_t params_len,
     void *arg)
@@ -1435,7 +1475,8 @@ static int ch_on_transport_params(const unsigned char *params,
 
 #ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
             /* Must match our initial DCID. */
-            if (!ossl_quic_conn_id_eq(&ch->init_dcid, &cid)) {
+            if (!ossl_quic_conn_id_eq(&ch->init_dcid, &cid)
+                && !ch_retry_replay_relax_tp(ch)) {
                 reason = TP_REASON_EXPECTED_VALUE("ORIG_DCID");
                 goto malformed;
             }
@@ -1466,7 +1507,8 @@ static int ch_on_transport_params(const unsigned char *params,
             }
 
             /* Must match Retry packet SCID. */
-            if (!ossl_quic_conn_id_eq(&ch->retry_scid, &cid)) {
+            if (!ossl_quic_conn_id_eq(&ch->retry_scid, &cid)
+                && !ch_retry_replay_relax_tp(ch)) {
                 reason = TP_REASON_EXPECTED_VALUE("RETRY_SCID");
                 goto malformed;
             }
@@ -1816,7 +1858,8 @@ static int ch_on_transport_params(const unsigned char *params,
             goto malformed;
         }
 
-        if (ch->doing_retry && !got_retry_scid) {
+        if (ch->doing_retry && !got_retry_scid
+            && !ch_retry_replay_relax_tp(ch)) {
             reason = TP_REASON_REQUIRED("RETRY_SCID");
             goto malformed;
         }
@@ -2866,6 +2909,36 @@ static void free_peer_token(const unsigned char *token,
     ossl_quic_free_peer_token((QUIC_TOKEN *)arg);
 }
 
+/*
+ * Put the channel into the state a client reaches after receiving a Retry,
+ * using a token and connection IDs harvested from an earlier connection rather
+ * than from a Retry packet we received ourselves. Unlike ch_retry(), there is
+ * no Initial in flight to mark lost, and the Initial secrets have not been
+ * provisioned yet -- ossl_quic_channel_start() does that for us, keying off
+ * doing_retry.
+ */
+static int ch_replay_retry(QUIC_CHANNEL *ch)
+{
+    ch->init_dcid = ch->retry_replay_odcid;
+    ch->retry_scid = ch->retry_replay_scid;
+
+    if (!ossl_quic_tx_packetiser_set_cur_dcid(ch->txp, &ch->retry_scid))
+        return 0;
+
+    /*
+     * The token buffer belongs to the channel and outlives the TXP, which is
+     * torn down first in ch_cleanup(), so the TXP gets no free callback.
+     */
+    if (!ossl_quic_tx_packetiser_set_initial_token(ch->txp,
+            ch->retry_replay_token,
+            ch->retry_replay_token_len,
+            NULL, NULL))
+        return 0;
+
+    ch->doing_retry = 1;
+    return 1;
+}
+
 int ossl_quic_channel_start(QUIC_CHANNEL *ch)
 {
     QUIC_TOKEN *token;
@@ -2881,14 +2954,26 @@ int ossl_quic_channel_start(QUIC_CHANNEL *ch)
         /* Calls to connect are idempotent */
         return 1;
 
+    /*
+     * Replaying a harvested Retry token, if the application armed one. This
+     * runs before anything reads init_dcid or touches the packetiser's token,
+     * and sets doing_retry, which the two blocks below key off.
+     */
+    if (ch->retry_replay_token != NULL && !ch_replay_retry(ch))
+        return 0;
+
     /* Inform QTX of peer address. */
     if (!ossl_quic_tx_packetiser_set_peer(ch->txp, &ch->cur_peer_addr))
         return 0;
 
     /*
-     * Look to see if we have a token, and if so, set it on the packetiser
+     * Look to see if we have a token, and if so, set it on the packetiser.
+     * Skipped when replaying a Retry token: the packetiser holds only one
+     * token, and ossl_quic_get_peer_token() takes a reference we would have to
+     * either overwrite (losing the replay) or leak.
      */
     if (!ch->is_server
+        && !ch->doing_retry
         && ossl_quic_get_peer_token(ch->port->channel_ctx,
             &ch->cur_peer_addr,
             &token)
@@ -2898,10 +2983,14 @@ int ossl_quic_channel_start(QUIC_CHANNEL *ch)
             token))
         free_peer_token(NULL, 0, token);
 
-    /* Plug in secrets for the Initial EL. */
+    /*
+     * Plug in secrets for the Initial EL. After a Retry -- received or
+     * replayed -- these derive from the Retry's SCID rather than the original
+     * DCID (RFC 9001 s.5.2).
+     */
     if (!ossl_quic_provide_initial_secret(ch->port->engine->libctx,
             ch->port->engine->propq,
-            &ch->init_dcid,
+            ch->doing_retry ? &ch->retry_scid : &ch->init_dcid,
             ch->is_server,
             ch->qrx, ch->qtx))
         return 0;

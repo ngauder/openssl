@@ -98,6 +98,11 @@ BIO *ossl_quic_conn_get_net_rbio(const SSL *s);
 BIO *ossl_quic_conn_get_net_wbio(const SSL *s);
 __owur int ossl_quic_conn_set_initial_peer_addr(SSL *s,
     const BIO_ADDR *peer_addr);
+__owur int ossl_quic_conn_set_retry_replay(SSL *s,
+    const unsigned char *token, size_t token_len,
+    const unsigned char *odcid, size_t odcid_len,
+    const unsigned char *retry_scid, size_t retry_scid_len,
+    uint64_t flags);
 __owur SSL *ossl_quic_conn_stream_new(SSL *s, uint64_t flags);
 __owur SSL *ossl_quic_get0_connection(SSL *s);
 __owur SSL *ossl_quic_get0_listener(SSL *s);

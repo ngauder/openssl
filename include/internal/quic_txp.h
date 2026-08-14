@@ -121,6 +121,13 @@ int ossl_quic_tx_packetiser_generate(OSSL_QUIC_TX_PACKETISER *txp,
 OSSL_TIME ossl_quic_tx_packetiser_get_deadline(OSSL_QUIC_TX_PACKETISER *txp);
 
 /*
+ * Slack required between an Initial token and the MDPL, so that a packet
+ * carrying the token still makes forward progress on the CRYPTO stream. A
+ * token larger than (mdpl - this) is rejected by the setter below.
+ */
+#define TXP_REQUIRED_TOKEN_MARGIN 160
+
+/*
  * Set the token used in Initial packets. The callback is called when the buffer
  * is no longer needed; for example, when the TXP is freed or when this function
  * is called again with a new buffer. Fails returning 0 if the token is too big

@@ -162,6 +162,20 @@ struct quic_conn_st {
     /* Initial peer L4 address. */
     BIO_ADDR init_peer_addr;
 
+    /*
+     * Client only: a Retry token, and the connection IDs it was issued
+     * against, harvested from an earlier connection and supplied by the
+     * application via SSL_set_quic_retry_replay(). Held here rather than on
+     * the channel because the setter runs without the domain mutex; it is
+     * pushed to the channel by configure_channel() before the handshake
+     * starts. NULL token means not armed.
+     */
+    unsigned char *retry_replay_token;
+    size_t retry_replay_token_len;
+    QUIC_CONN_ID retry_replay_odcid;
+    QUIC_CONN_ID retry_replay_scid;
+    uint64_t retry_replay_flags;
+
 #ifndef OPENSSL_NO_QUIC_THREAD_ASSIST
     /* Manages thread for QUIC thread assisted mode. */
     QUIC_THREAD_ASSIST thread_assist;

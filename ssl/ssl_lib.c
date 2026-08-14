@@ -7857,6 +7857,25 @@ int SSL_set1_initial_peer_addr(SSL *s, const BIO_ADDR *peer_addr)
 #endif
 }
 
+int SSL_set_quic_retry_replay(SSL *s,
+                              const unsigned char *token, size_t token_len,
+                              const unsigned char *odcid, size_t odcid_len,
+                              const unsigned char *retry_scid,
+                              size_t retry_scid_len,
+                              uint64_t flags)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return 0;
+
+    return ossl_quic_conn_set_retry_replay(s, token, token_len,
+                                           odcid, odcid_len,
+                                           retry_scid, retry_scid_len, flags);
+#else
+    return 0;
+#endif
+}
+
 int SSL_shutdown_ex(SSL *ssl, uint64_t flags,
     const SSL_SHUTDOWN_EX_ARGS *args,
     size_t args_len)

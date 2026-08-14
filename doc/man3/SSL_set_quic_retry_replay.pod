@@ -1,0 +1,100 @@
+=pod
+
+=head1 NAME
+
+SSL_set_quic_retry_replay, SSL_QUIC_RETRY_REPLAY_RELAX_TP -
+replay a QUIC Retry token on a new connection
+
+=head1 SYNOPSIS
+
+ #include <openssl/ssl.h>
+
+ #define SSL_QUIC_RETRY_REPLAY_RELAX_TP
+
+ int SSL_set_quic_retry_replay(SSL *s,
+                               const unsigned char *token, size_t token_len,
+                               const unsigned char *odcid, size_t odcid_len,
+                               const unsigned char *retry_scid,
+                               size_t retry_scid_len,
+                               uint64_t flags);
+
+=head1 DESCRIPTION
+
+SSL_set_quic_retry_replay() places a QUIC connection in client mode into the
+state it would have reached after receiving a Retry packet, using an address
+validation token and connection IDs obtained from some earlier connection
+rather than from a Retry packet received on this one. The connection then sends
+I<token> in the token field of its Initial packets.
+
+This exists for measurement. A Retry token is issued to one client address, and
+RFC 9000 section 8.1.4 requires a server to reject one presented from a
+different address; replaying a token deliberately is how that requirement can be
+tested. It is not a way to establish connections faster, and a server behaving
+correctly will refuse.
+
+Three values are required, because a token cannot be replayed on its own.
+I<token> is the Retry token itself. I<retry_scid> is the Source Connection ID of
+the Retry packet that carried it, which becomes the Destination Connection ID of
+the Initial packets sent on this connection and, per RFC 9001 section 5.2, the
+input from which the Initial secrets are derived. I<odcid> is the Destination
+Connection ID that the earlier client used in the Initial packet which drew the
+Retry. A server that accepts the token asserts both back in its
+B<original_destination_connection_id> and B<retry_source_connection_id>
+transport parameters, and they are checked.
+
+I<odcid_len> must be between 8 and 20 bytes inclusive, I<retry_scid_len> between
+1 and 20, and I<token_len> between 1 and 1040. This function makes a copy of all
+three; the buffers may be freed by the caller after it returns.
+
+This function can be used only on a QUIC connection SSL object in client mode,
+and only before a connection attempt is first made.
+
+=head1 FLAGS
+
+B<SSL_QUIC_RETRY_REPLAY_RELAX_TP> stops a disagreement between the server's
+connection ID transport parameters and the values supplied here from failing the
+handshake. Without it, a server which validates the replayed token but either
+reconstructs a different original Destination Connection ID, or treats the token
+as a NEW_TOKEN token and so sends no B<retry_source_connection_id>, causes the
+local endpoint to terminate the connection with B<TRANSPORT_PARAMETER_ERROR>.
+Both are legitimate server behaviours under RFC 9000 section 8.1.3, and in both
+the server accepted the token, so for a measurement the disagreement is the
+observation rather than a reason to tear the connection down.
+
+=head1 NOTES
+
+A connection carrying a replayed token sends its Initial packet with packet
+number 0, whereas a client that received a Retry itself resumes from packet
+number 1.
+
+If the server responds to the replayed token by issuing a fresh Retry, that
+Retry is discarded: the connection is already in the "doing retry" state, in
+which a second Retry is not expected, and its integrity tag is in any case
+computed over a different connection ID than the one this endpoint would check
+against. The connection then remains idle until the idle timeout expires. An
+application that needs to distinguish this outcome from an unresponsive path
+should inspect received datagrams itself, for example through a message callback
+installed with L<SSL_set_msg_callback(3)>.
+
+=head1 RETURN VALUES
+
+Returns 1 on success and 0 on failure.
+
+=head1 SEE ALSO
+
+L<SSL_set1_initial_peer_addr(3)>, L<SSL_get_conn_close_info(3)>, L<ssl(7)>
+
+=head1 HISTORY
+
+The SSL_set_quic_retry_replay() function was added in OpenSSL 4.0.1.
+
+=head1 COPYRIGHT
+
+Copyright 2026 The OpenSSL Project Authors. All Rights Reserved.
+
+Licensed under the Apache License 2.0 (the "License").  You may not use
+this file except in compliance with the License.  You can obtain a copy
+in the file LICENSE in the source distribution or at
+L<https://www.openssl.org/source/license.html>.
+
+=cut

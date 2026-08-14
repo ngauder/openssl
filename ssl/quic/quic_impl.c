@@ -20,6 +20,7 @@
 #include "internal/quic_engine.h"
 #include "internal/quic_port.h"
 #include "internal/quic_reactor_wait_ctx.h"
+#include "internal/quic_txp.h"
 #include "internal/time.h"
 
 typedef struct qctx_st QCTX;
@@ -705,6 +706,9 @@ static void qc_cleanup(QUIC_CONNECTION *qc, int have_lock)
     ossl_quic_channel_free(qc->ch);
     qc->ch = NULL;
 
+    OPENSSL_free(qc->retry_replay_token);
+    qc->retry_replay_token = NULL;
+
     if (qc->port != NULL && qc->listener == NULL && qc->pending == 0) { /* TODO */
         quic_unref_port_bios(qc->port);
         ossl_quic_port_free(qc->port);
@@ -1307,6 +1311,66 @@ int ossl_quic_conn_set_initial_peer_addr(SSL *s,
     return BIO_ADDR_copy(&ctx.qc->init_peer_addr, peer_addr);
 }
 
+int ossl_quic_conn_set_retry_replay(SSL *s,
+                                    const unsigned char *token,
+                                    size_t token_len,
+                                    const unsigned char *odcid,
+                                    size_t odcid_len,
+                                    const unsigned char *retry_scid,
+                                    size_t retry_scid_len,
+                                    uint64_t flags)
+{
+    QCTX ctx;
+    unsigned char *copy;
+
+    if (!expect_quic_conn_only(s, &ctx))
+        return 0;
+
+    if (ctx.qc->started || ctx.qc->as_server)
+        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED,
+            NULL);
+
+    if ((flags & ~(uint64_t)SSL_QUIC_RETRY_REPLAY_RELAX_TP) != 0)
+        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_PASSED_INVALID_ARGUMENT,
+            "unsupported flag");
+
+    /*
+     * Nothing downstream bounds these: QUIC_CONN_ID.id is a fixed 20-byte
+     * array, and the only length enforcement in the tree
+     * (ossl_quic_lcidm_enrol_odcid) is on the server path. The token bound is
+     * what txp_check_token_len() will accept against the 1200-byte minimum
+     * initial datagram, checked here so the caller gets a diagnosis rather
+     * than a connection that silently fails to start.
+     */
+    if (token == NULL || token_len == 0
+        || token_len > QUIC_MIN_INITIAL_DGRAM_LEN - TXP_REQUIRED_TOKEN_MARGIN)
+        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_PASSED_INVALID_ARGUMENT,
+            "invalid token");
+
+    if (odcid == NULL || odcid_len < QUIC_MIN_ODCID_LEN
+        || odcid_len > QUIC_MAX_CONN_ID_LEN
+        || retry_scid == NULL || retry_scid_len == 0
+        || retry_scid_len > QUIC_MAX_CONN_ID_LEN)
+        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_PASSED_INVALID_ARGUMENT,
+            "invalid connection id");
+
+    if ((copy = OPENSSL_memdup(token, token_len)) == NULL)
+        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_CRYPTO_LIB, NULL);
+
+    OPENSSL_free(ctx.qc->retry_replay_token);
+    ctx.qc->retry_replay_token = copy;
+    ctx.qc->retry_replay_token_len = token_len;
+
+    ctx.qc->retry_replay_odcid.id_len = (unsigned char)odcid_len;
+    memcpy(ctx.qc->retry_replay_odcid.id, odcid, odcid_len);
+
+    ctx.qc->retry_replay_scid.id_len = (unsigned char)retry_scid_len;
+    memcpy(ctx.qc->retry_replay_scid.id, retry_scid, retry_scid_len);
+
+    ctx.qc->retry_replay_flags = flags;
+    return 1;
+}
+
 /*
  * QUIC Front-End I/O API: Asynchronous I/O Management
  * ===================================================
@@ -1831,6 +1895,15 @@ static int configure_channel(QUIC_CONNECTION *qc)
     assert(qc->ch != NULL);
 
     if (!ossl_quic_channel_set_peer_addr(qc->ch, &qc->init_peer_addr))
+        return 0;
+
+    if (qc->retry_replay_token != NULL
+        && !ossl_quic_channel_set_retry_replay(qc->ch,
+            qc->retry_replay_token,
+            qc->retry_replay_token_len,
+            &qc->retry_replay_odcid,
+            &qc->retry_replay_scid,
+            qc->retry_replay_flags))
         return 0;
 
     return 1;

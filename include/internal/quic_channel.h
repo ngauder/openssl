@@ -330,6 +330,22 @@ int ossl_quic_channel_get_peer_addr(QUIC_CHANNEL *ch, BIO_ADDR *peer_addr);
 int ossl_quic_channel_set_peer_addr(QUIC_CHANNEL *ch, const BIO_ADDR *peer_addr);
 
 /*
+ * Arm a Retry token replay on a client channel. `token` is copied. `odcid` is
+ * the Destination Connection ID the harvesting client used in the Initial that
+ * drew the Retry, and `retry_scid` is the Source Connection ID of the Retry
+ * packet itself; together they are the state a genuine client would hold after
+ * a Retry, and the server asserts both back in its transport parameters.
+ *
+ * Must be called before ossl_quic_channel_start(). Client only.
+ */
+int ossl_quic_channel_set_retry_replay(QUIC_CHANNEL *ch,
+                                       const unsigned char *token,
+                                       size_t token_len,
+                                       const QUIC_CONN_ID *odcid,
+                                       const QUIC_CONN_ID *retry_scid,
+                                       uint64_t flags);
+
+/*
  * Returns an existing stream by stream ID. Returns NULL if the stream does not
  * exist.
  */

@@ -2306,6 +2306,23 @@ __owur int SSL_net_write_desired(SSL *s);
 __owur int SSL_set_blocking_mode(SSL *s, int blocking);
 __owur int SSL_get_blocking_mode(SSL *s);
 __owur int SSL_set1_initial_peer_addr(SSL *s, const BIO_ADDR *peer_addr);
+
+/*
+ * Do not fail the handshake if the server's original_destination_connection_id
+ * or retry_source_connection_id transport parameters disagree with the values
+ * supplied to SSL_set_quic_retry_replay(). Intended for measurement, where a
+ * disagreement is an observation about the server rather than a reason to
+ * abandon a connection the server was willing to establish.
+ */
+#define SSL_QUIC_RETRY_REPLAY_RELAX_TP (1ULL << 0)
+__owur int SSL_set_quic_retry_replay(SSL *s,
+                                     const unsigned char *token,
+                                     size_t token_len,
+                                     const unsigned char *odcid,
+                                     size_t odcid_len,
+                                     const unsigned char *retry_scid,
+                                     size_t retry_scid_len,
+                                     uint64_t flags);
 __owur SSL *SSL_get0_connection(SSL *s);
 __owur int SSL_is_connection(SSL *s);
 
