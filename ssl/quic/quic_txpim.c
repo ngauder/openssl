@@ -116,6 +116,14 @@ static void txpim_clear(QUIC_TXPIM_PKT_EX *ex)
     ex->public.had_max_streams_uni_frame = 0;
     ex->public.had_ack_frame = 0;
     ex->public.had_conn_close = 0;
+    /*
+     * These records are recycled through a free list, so a probe field left set
+     * here would be inherited by an ordinary packet and reported as an
+     * acknowledged probe of a size nobody sent.
+     */
+    ex->public.is_size_probe = 0;
+    ex->public.size_probe_idx = 0;
+    ex->public.size_probe_len = 0;
 }
 
 QUIC_TXPIM_PKT *ossl_quic_txpim_pkt_alloc(QUIC_TXPIM *txpim)

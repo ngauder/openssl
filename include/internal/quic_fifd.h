@@ -48,6 +48,17 @@ struct quic_fifd_st {
     void *sstream_updated_arg;
     QLOG *(*get_qlog_cb)(void *arg);
     void *get_qlog_cb_arg;
+
+    /*
+     * Reports the fate of a packet size probe, per
+     * draft-seemann-quic-ppdplpmtud. Called from the ack, loss and discard
+     * paths while the packet record is still intact, since those paths release
+     * it immediately afterwards. acked is 1 on acknowledgement and 0 when the
+     * probe was lost or its packet number space was dropped, which resolves it
+     * as unconfirmed rather than leaving it outstanding forever.
+     */
+    void (*size_probe_cb)(uint16_t idx, uint16_t len, int acked, void *arg);
+    void *size_probe_cb_arg;
 };
 
 int ossl_quic_fifd_init(QUIC_FIFD *fifd,
@@ -82,6 +93,13 @@ int ossl_quic_fifd_pkt_commit(QUIC_FIFD *fifd, QUIC_TXPIM_PKT *pkt);
 
 void ossl_quic_fifd_set_qlog_cb(QUIC_FIFD *fifd, QLOG *(*get_qlog_cb)(void *arg),
     void *arg);
+
+/*
+ * Registers the packet size probe result callback. A setter rather than another
+ * pair of arguments to ossl_quic_fifd_init, which already takes twelve.
+ */
+void ossl_quic_fifd_set_size_probe_cb(QUIC_FIFD *fifd,
+    void (*cb)(uint16_t idx, uint16_t len, int acked, void *arg), void *arg);
 
 void ossl_quic_fifd_pkt_discard_unreliable(QUIC_FIFD *fifd, QUIC_TXPIM_PKT *tpkt);
 #endif

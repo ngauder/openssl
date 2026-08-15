@@ -31,6 +31,27 @@ OpenSSL Releases
 OpenSSL 4.1
 -----------
 
+### Local changes on top of 4.1.0-beta1
+
+ * Added `SSL_set_quic_size_probes()` and `SSL_get_quic_size_probes()`,
+   implementing the client side of draft-seemann-quic-ppdplpmtud. A client
+   armed before it is started sends one ACK-eliciting packet per requested
+   datagram size alongside its regular first flight, each padded to its size
+   with PADDING frames inside the AEAD, and reports which sizes the peer
+   acknowledged. Ported from `quic-size-probes` (on 4.0.1) so that the
+   probes can run beside `SSL_VALUE_QUIC_UDP_PAYLOAD_SIZE_MAX`, which 4.1
+   adds.
+
+   *Nikolas Gauder*
+
+ * **libssl export ordinals are allocated across independent fork branches.**
+   629 stays reserved for `SSL_set_quic_retry_replay` (`quic-retry-replay`);
+   630 and 631 are `SSL_set_quic_size_probes` and `SSL_get_quic_size_probes`,
+   as on `quic-size-probes`. 4.1.0-beta1's own table ends at 628, so none of
+   these collide with it.
+
+   *Nikolas Gauder*
+
 ### Changes between 4.0 and 4.1 beta 1 [23 Sep 2026]
 
  * Added support for DTLS 1.3 ([RFC 9147]).

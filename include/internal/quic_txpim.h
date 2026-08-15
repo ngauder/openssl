@@ -44,6 +44,16 @@ typedef struct quic_txpim_pkt_st {
     unsigned int had_ack_frame : 1;
     unsigned int had_conn_close : 1;
 
+    /*
+     * Packet size probe accounting, per draft-seemann-quic-ppdplpmtud.
+     * size_probe_idx is the probe's position in the list of sizes the
+     * application asked for, so an acknowledgement can be reported against that
+     * list; size_probe_len is the datagram size it was built to reach.
+     */
+    unsigned int is_size_probe : 1;
+    uint16_t size_probe_idx;
+    uint16_t size_probe_len;
+
     /* Private data follows. */
 } QUIC_TXPIM_PKT;
 

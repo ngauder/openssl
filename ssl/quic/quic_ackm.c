@@ -970,12 +970,31 @@ static void ackm_on_pkts_lost(OSSL_ACKM *ackm, int pkt_space,
             if (p->pkt_num > largest_pn_lost)
                 largest_pn_lost = p->pkt_num;
 
-            if (!pseudo) {
+            if (pseudo) {
                 /*
                  * If this is pseudo-loss (e.g. during connection retry) we do not
                  * inform the CC as it is not a real loss and not reflective of
                  * network conditions.
                  */
+            } else if (p->is_mtu_probe) {
+                /*
+                 * A packet size probe is a measurement, not a transmission. Its
+                 * loss means the path would not carry a datagram that large,
+                 * which says nothing about congestion, so it must not reduce
+                 * the window: RFC 8899 says as much and
+                 * draft-seemann-quic-ppdplpmtud repeats it.
+                 *
+                 * It must still give the bytes back, which is why this is not
+                 * simply skipping the call. on_data_lost() both releases the
+                 * bytes and signals congestion, so declining it outright would
+                 * leave every lost probe counted against the window for the
+                 * life of the connection. on_data_invalidated() is the release
+                 * without the signal, as used when a packet number space is
+                 * discarded.
+                 */
+                ackm->cc_method->on_data_invalidated(ackm->cc_data,
+                                                     p->num_bytes);
+            } else {
                 loss_info.tx_time = p->time;
                 loss_info.tx_size = p->num_bytes;
 
