@@ -2306,6 +2306,31 @@ __owur int SSL_net_write_desired(SSL *s);
 __owur int SSL_set_blocking_mode(SSL *s, int blocking);
 __owur int SSL_get_blocking_mode(SSL *s);
 __owur int SSL_set1_initial_peer_addr(SSL *s, const BIO_ADDR *peer_addr);
+
+/*
+ * Packet size probing, per draft-seemann-quic-ppdplpmtud.
+ *
+ * SSL_set_quic_size_probes() arms a client connection, before it is started, to
+ * send one ACK-eliciting packet per requested datagram size alongside its
+ * regular first flight. Each probe carries a PING frame and enough PADDING
+ * frames to reach its size, so the padding is inside the AEAD exactly as a
+ * conformant client's would be. Sizes are UDP payload bytes, must be given
+ * largest first, and must each be at least QUIC's 1200 byte minimum: a smaller
+ * probe would say nothing the mandatory first flight has not already said.
+ *
+ * SSL_get_quic_size_probes() reports what came back. *confirmed receives the
+ * largest acknowledged size, which vouches for every smaller one, or zero if
+ * none was acknowledged; *acked receives one bit per requested size, indexed by
+ * its position in the array that was set. Either pointer may be NULL.
+ *
+ * An unacknowledged probe does not prove a size is unsupported. The mechanism
+ * finds a confirmed lower bound, not the path MTU.
+ */
+#define SSL_QUIC_MAX_SIZE_PROBES 16
+__owur int SSL_set_quic_size_probes(SSL *s, const uint16_t *sizes, size_t n);
+__owur int SSL_get_quic_size_probes(SSL *s, uint16_t *confirmed,
+                                    uint64_t *acked);
+
 __owur SSL *SSL_get0_connection(SSL *s);
 __owur int SSL_is_connection(SSL *s);
 

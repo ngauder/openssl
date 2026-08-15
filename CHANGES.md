@@ -29,6 +29,39 @@ OpenSSL Releases
 
 -----------
 
+### Local changes on top of 4.0.1
+
+ * Added `SSL_set_quic_size_probes()` and `SSL_get_quic_size_probes()`,
+   implementing the client side of draft-seemann-quic-ppdplpmtud. A client
+   armed before it is started sends one ACK-eliciting packet per requested
+   datagram size alongside its regular first flight, each padded to its size
+   with PADDING frames inside the AEAD, and reports which sizes the peer
+   acknowledged.
+
+   *Nikolas Gauder*
+
+ * **libssl export ordinals are allocated across two independent fork
+   branches, and neither contains the other.**
+
+   | ordinal | symbol | branch |
+   | --- | --- | --- |
+   | 629 | `SSL_set_quic_retry_replay` | `quic-retry-replay` |
+   | 630 | `SSL_set_quic_size_probes` | `quic-size-probes` |
+   | 631 | `SSL_get_quic_size_probes` | `quic-size-probes` |
+   | 632+ | free | |
+
+   Both branches sit directly on 4.0.1, so both would otherwise allocate the
+   next free ordinal and give one number two meanings — a mislinked shared
+   library rather than anything that fails loudly. This branch therefore leaves
+   a deliberate gap at 629.
+
+   `util/libssl.num` here ends at 631 with no 629, so a plain `make update`
+   derives the next ordinal from the maximum and is safe. It does **not**
+   preserve comments — `OpenSSL::Ordinals::write` regenerates the file from
+   parsed entries only — which is why this table lives here rather than there.
+
+   *Nikolas Gauder*
+
 ### Changes between 4.0.0 and 4.0.1 [9 Jun 2026]
 
  * Fixed heap use-after-free in `PKCS7_verify()`.

@@ -3563,6 +3563,110 @@ end:
     return ret;
 }
 
+/*
+ * Packet size probes, per draft-seemann-quic-ppdplpmtud. Arms a client with a
+ * list of datagram sizes before it connects, and checks that the probes were
+ * built, sent, and reported back as acknowledged.
+ *
+ * The transport here is a datagram pair with no path in between, so every size
+ * gets through; what this pins down is the mechanism, not path behaviour --
+ * that the padding reaches the requested size at all, that the acknowledgement
+ * is attributed to the right entry of the caller's list, and that confirmed is
+ * the largest acknowledged size rather than the last one seen.
+ */
+static int test_quic_size_probes(void)
+{
+    SSL_CTX *cctx = NULL;
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    /* Descending, as the API requires, and well inside a 1500 byte link. */
+    static const uint16_t sizes[] = { 1400, 1300, 1250 };
+    uint16_t confirmed = 0;
+    uint64_t acked = 0;
+    int ret = 0;
+
+    if (!TEST_ptr(cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method())))
+        goto end;
+
+    if (!TEST_true(qtest_create_quic_objects(libctx, cctx, NULL,
+            cert, privkey, 0,
+            &qtserv, &clientquic,
+            NULL, NULL)))
+        goto end;
+
+    /* Must be armed before the connection is started. */
+    if (!TEST_true(SSL_set_quic_size_probes(clientquic, sizes,
+            OSSL_NELEM(sizes))))
+        goto end;
+
+    if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+        goto end;
+
+    if (!TEST_true(SSL_get_quic_size_probes(clientquic, &confirmed, &acked)))
+        goto end;
+
+    /* Every probe should have been acknowledged over a lossless pair. */
+    if (!TEST_uint_eq((unsigned int)confirmed, 1400)
+        || !TEST_uint64_t_eq(acked, 0x7))
+        goto end;
+
+    ret = 1;
+end:
+    ossl_quic_tserver_free(qtserv);
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+    return ret;
+}
+
+/*
+ * The setter's contract: a size below QUIC's minimum says nothing the mandatory
+ * first flight has not, an ascending list would make the acknowledgement bitmap
+ * index something other than what the caller passed, and the cap is what the
+ * bitmap can address.
+ */
+static int test_quic_size_probes_reject(void)
+{
+    SSL_CTX *cctx = NULL;
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    static const uint16_t too_small[] = { 1199 };
+    static const uint16_t ascending[] = { 1250, 1400 };
+    static const uint16_t duplicate[] = { 1300, 1300 };
+    uint16_t many[SSL_QUIC_MAX_SIZE_PROBES + 1];
+    size_t i;
+    int ret = 0;
+
+    for (i = 0; i < OSSL_NELEM(many); ++i)
+        many[i] = (uint16_t)(1472 - i);
+
+    if (!TEST_ptr(cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method())))
+        goto end;
+
+    if (!TEST_true(qtest_create_quic_objects(libctx, cctx, NULL,
+            cert, privkey, 0,
+            &qtserv, &clientquic,
+            NULL, NULL)))
+        goto end;
+
+    if (!TEST_false(SSL_set_quic_size_probes(clientquic, too_small, 1))
+        || !TEST_false(SSL_set_quic_size_probes(clientquic, ascending, 2))
+        || !TEST_false(SSL_set_quic_size_probes(clientquic, duplicate, 2))
+        || !TEST_false(SSL_set_quic_size_probes(clientquic, many,
+                                                OSSL_NELEM(many))))
+        goto end;
+
+    /* A well formed list is still accepted after the rejections. */
+    if (!TEST_true(SSL_set_quic_size_probes(clientquic, ascending + 1, 1)))
+        goto end;
+
+    ret = 1;
+end:
+    ossl_quic_tserver_free(qtserv);
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+    return ret;
+}
+
 /***********************************************************************************/
 OPT_TEST_DECLARE_USAGE("provider config certsdir datadir\n")
 
@@ -3675,6 +3779,8 @@ int setup_tests(void)
     ADD_TEST(test_quic_peer_addr_v4);
     ADD_TEST(test_ech);
     ADD_TEST(test_quic_resize_txe);
+    ADD_TEST(test_quic_size_probes);
+    ADD_TEST(test_quic_size_probes_reject);
 
     return 1;
 err:

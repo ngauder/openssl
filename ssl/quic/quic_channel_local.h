@@ -186,6 +186,21 @@ struct quic_channel_st {
     uint16_t diag_num_rx_ack; /* Number of ACK frames received */
 
     /*
+     * Packet size probing, per draft-seemann-quic-ppdplpmtud. size_probes is
+     * the requested sizes, largest first; size_probe_next is how many have been
+     * sent, so the campaign can resume across ticks; size_probe_acked has one
+     * bit per entry, indexed by position, and size_probe_confirmed is the
+     * largest size acknowledged so far, which vouches for every smaller one.
+     */
+    uint16_t size_probes[SSL_QUIC_MAX_SIZE_PROBES];
+    /* What each probe's datagram actually came out as, for verification. */
+    uint16_t size_probe_sent[SSL_QUIC_MAX_SIZE_PROBES];
+    size_t num_size_probes;
+    size_t size_probe_next;
+    uint64_t size_probe_acked;
+    uint16_t size_probe_confirmed;
+
+    /*
      * Temporary staging area to store information about the incoming packet we
      * are currently processing.
      */

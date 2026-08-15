@@ -1307,6 +1307,89 @@ int ossl_quic_conn_set_initial_peer_addr(SSL *s,
     return BIO_ADDR_copy(&ctx.qc->init_peer_addr, peer_addr);
 }
 
+int ossl_quic_conn_set_size_probes(SSL *s, const uint16_t *sizes, size_t n)
+{
+    QCTX ctx;
+    size_t i;
+
+    if (!expect_quic_conn_only(s, &ctx))
+        return 0;
+
+    /*
+     * The probes ride with the first flight, so they have to be armed before
+     * the connection is started. A server does not send them: the mechanism is
+     * a client one, and this fork only implements that side.
+     */
+    if (ctx.qc->started || ctx.qc->as_server)
+        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx,
+            ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED, NULL);
+
+    if (n == 0) {
+        ctx.qc->num_size_probes = 0;
+        return 1;
+    }
+
+    if (sizes == NULL || n > SSL_QUIC_MAX_SIZE_PROBES)
+        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_PASSED_INVALID_ARGUMENT,
+            NULL);
+
+    for (i = 0; i < n; ++i) {
+        /*
+         * A probe below the minimum datagram size says nothing the mandatory
+         * first flight has not already said.
+         */
+        if (sizes[i] < QUIC_MIN_INITIAL_DGRAM_LEN)
+            return QUIC_RAISE_NON_NORMAL_ERROR(&ctx,
+                ERR_R_PASSED_INVALID_ARGUMENT, NULL);
+
+        /*
+         * Largest first, strictly descending. The draft sends in this order so
+         * that smaller probes carry larger packet numbers and their
+         * acknowledgements expose the missing larger ones to packet-threshold
+         * loss detection. Requiring it of the caller rather than sorting here
+         * keeps the acknowledgement bitmap indexed by the caller's own order,
+         * which is the only order it can interpret.
+         */
+        if (i > 0 && sizes[i] >= sizes[i - 1])
+            return QUIC_RAISE_NON_NORMAL_ERROR(&ctx,
+                ERR_R_PASSED_INVALID_ARGUMENT, NULL);
+    }
+
+    memcpy(ctx.qc->size_probes, sizes, n * sizeof(*sizes));
+    ctx.qc->num_size_probes = n;
+    return 1;
+}
+
+QUIC_TAKES_LOCK
+int ossl_quic_conn_get_size_probes(SSL *s, uint16_t *confirmed,
+                                   uint64_t *acked)
+{
+    QCTX ctx;
+
+    if (!expect_quic_conn_only(s, &ctx))
+        return 0;
+
+    qctx_lock(&ctx);
+
+    /*
+     * Before the connection is started there is no channel and so no result.
+     * Report zeroes rather than failing: "asked and nothing confirmed" is the
+     * same shape as "asked and not started", and the caller distinguishes them
+     * by whether it started the connection.
+     */
+    if (ctx.qc->ch == NULL) {
+        if (confirmed != NULL)
+            *confirmed = 0;
+        if (acked != NULL)
+            *acked = 0;
+    } else {
+        ossl_quic_channel_get_size_probes(ctx.qc->ch, confirmed, acked);
+    }
+
+    qctx_unlock(&ctx);
+    return 1;
+}
+
 /*
  * QUIC Front-End I/O API: Asynchronous I/O Management
  * ===================================================
@@ -1831,6 +1914,11 @@ static int configure_channel(QUIC_CONNECTION *qc)
     assert(qc->ch != NULL);
 
     if (!ossl_quic_channel_set_peer_addr(qc->ch, &qc->init_peer_addr))
+        return 0;
+
+    if (qc->num_size_probes > 0
+        && !ossl_quic_channel_set_size_probes(qc->ch, qc->size_probes,
+                                              qc->num_size_probes))
         return 0;
 
     return 1;

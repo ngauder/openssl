@@ -103,10 +103,32 @@ typedef struct quic_txp_status_st {
     int sent_ack_eliciting; /* Was an ACK-eliciting packet sent? */
     int sent_handshake; /* Was a Handshake packet sent? */
     size_t sent_pkt; /* Number of packets sent (0 if nothing was sent) */
+    /*
+     * Size of the datagram produced, in bytes. Reported so a size probe can be
+     * checked against what actually went on the wire rather than against what
+     * was asked for: the padding arithmetic leaves no slack, so a probe that
+     * fell short would otherwise be acknowledged and recorded as if it had
+     * been the requested size.
+     */
+    size_t sent_dgram_len;
 } QUIC_TXP_STATUS;
 
 int ossl_quic_tx_packetiser_generate(OSSL_QUIC_TX_PACKETISER *txp,
     QUIC_TXP_STATUS *status);
+
+/*
+ * Generates a single packet size probe datagram of exactly dgram_len bytes, per
+ * draft-seemann-quic-ppdplpmtud: an Initial packet carrying a PING frame and
+ * PADDING frames to reach that size, with its own packet number. idx is the
+ * probe's position in the caller's list of sizes, reported back with the
+ * acknowledgement so the caller can index its own array.
+ *
+ * The caller must first raise the QTX's maximum datagram payload length to at
+ * least dgram_len, and must restore it afterwards: left raised, it lets the
+ * next ordinary CRYPTO packet grow beyond the size the path was tested at.
+ */
+int ossl_quic_tx_packetiser_generate_size_probe(OSSL_QUIC_TX_PACKETISER *txp,
+    size_t dgram_len, uint16_t idx, QUIC_TXP_STATUS *status);
 
 /*
  * Returns a deadline after which a call to ossl_quic_tx_packetiser_generate()
@@ -161,6 +183,14 @@ int ossl_quic_tx_packetiser_set_peer(OSSL_QUIC_TX_PACKETISER *txp,
 void ossl_quic_tx_packetiser_set_qlog_cb(OSSL_QUIC_TX_PACKETISER *txp,
     QLOG *(*get_qlog_cb)(void *arg),
     void *get_qlog_cb_arg);
+
+/*
+ * Registers the callback reporting the fate of each packet size probe: acked is
+ * 1 on acknowledgement, 0 if the probe was lost or its packet number space was
+ * discarded before it resolved.
+ */
+void ossl_quic_tx_packetiser_set_size_probe_cb(OSSL_QUIC_TX_PACKETISER *txp,
+    void (*cb)(uint16_t idx, uint16_t len, int acked, void *arg), void *arg);
 
 /*
  * Inform the TX packetiser that an EL has been discarded. Idempotent.

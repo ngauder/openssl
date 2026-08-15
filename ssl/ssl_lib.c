@@ -7857,6 +7857,30 @@ int SSL_set1_initial_peer_addr(SSL *s, const BIO_ADDR *peer_addr)
 #endif
 }
 
+int SSL_set_quic_size_probes(SSL *s, const uint16_t *sizes, size_t n)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return 0;
+
+    return ossl_quic_conn_set_size_probes(s, sizes, n);
+#else
+    return 0;
+#endif
+}
+
+int SSL_get_quic_size_probes(SSL *s, uint16_t *confirmed, uint64_t *acked)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return 0;
+
+    return ossl_quic_conn_get_size_probes(s, confirmed, acked);
+#else
+    return 0;
+#endif
+}
+
 int SSL_shutdown_ex(SSL *ssl, uint64_t flags,
     const SSL_SHUTDOWN_EX_ARGS *args,
     size_t args_len)

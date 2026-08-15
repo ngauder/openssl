@@ -892,3 +892,4 @@ OPENSSL_store_u64_be                    inline
 OPENSSL_store_u64_le                    inline
 OSSL_BEGIN_ALLOW_DEPRECATED             define
 OSSL_END_ALLOW_DEPRECATED               define
+SSL_QUIC_MAX_SIZE_PROBES                define

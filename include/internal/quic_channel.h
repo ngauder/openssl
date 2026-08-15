@@ -330,6 +330,22 @@ int ossl_quic_channel_get_peer_addr(QUIC_CHANNEL *ch, BIO_ADDR *peer_addr);
 int ossl_quic_channel_set_peer_addr(QUIC_CHANNEL *ch, const BIO_ADDR *peer_addr);
 
 /*
+ * Arms packet size probing, per draft-seemann-quic-ppdplpmtud. Sizes are UDP
+ * payload bytes, largest first, validated by the caller. Must be set before the
+ * channel is started, since the probes ride with the first flight.
+ */
+int ossl_quic_channel_set_size_probes(QUIC_CHANNEL *ch, const uint16_t *sizes,
+                                      size_t n);
+
+/*
+ * Reports the largest acknowledged probe size, which vouches for every smaller
+ * one, and a bitmap of which requested sizes were acknowledged, indexed by
+ * position in the array that was set. Either pointer may be NULL.
+ */
+void ossl_quic_channel_get_size_probes(QUIC_CHANNEL *ch, uint16_t *confirmed,
+                                       uint64_t *acked);
+
+/*
  * Returns an existing stream by stream ID. Returns NULL if the stream does not
  * exist.
  */

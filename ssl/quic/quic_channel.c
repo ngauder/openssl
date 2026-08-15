@@ -97,6 +97,9 @@ static void ch_start_terminating(QUIC_CHANNEL *ch,
     int force_immediate);
 static void ch_on_txp_ack_tx(const OSSL_QUIC_FRAME_ACK *ack, uint32_t pn_space,
     void *arg);
+static void ch_on_size_probe_result(uint16_t idx, uint16_t len, int acked,
+    void *arg);
+static void ch_tx_size_probes(QUIC_CHANNEL *ch);
 static void ch_record_state_transition(QUIC_CHANNEL *ch, uint32_t new_state);
 
 DEFINE_LHASH_OF_EX(QUIC_SRT_ELEM);
@@ -293,6 +296,8 @@ static int ch_init(QUIC_CHANNEL *ch)
         ossl_quic_tx_packetiser_set_validated(ch->txp);
 
     ossl_quic_tx_packetiser_set_ack_tx_cb(ch->txp, ch_on_txp_ack_tx, ch);
+    ossl_quic_tx_packetiser_set_size_probe_cb(ch->txp, ch_on_size_probe_result,
+                                              ch);
 
     /*
      * qrx does not exist yet, then we must be dealing with client channel
@@ -516,6 +521,33 @@ int ossl_quic_channel_get_peer_addr(QUIC_CHANNEL *ch, BIO_ADDR *peer_addr)
         return 0;
 
     return BIO_ADDR_copy(peer_addr, &ch->cur_peer_addr);
+}
+
+int ossl_quic_channel_set_size_probes(QUIC_CHANNEL *ch, const uint16_t *sizes,
+                                      size_t n)
+{
+    if (ch->is_server || ch->state != QUIC_CHANNEL_STATE_IDLE)
+        return 0;
+
+    if (n > SSL_QUIC_MAX_SIZE_PROBES)
+        return 0;
+
+    if (n > 0)
+        memcpy(ch->size_probes, sizes, n * sizeof(*sizes));
+    ch->num_size_probes = n;
+    ch->size_probe_next = 0;
+    ch->size_probe_acked = 0;
+    ch->size_probe_confirmed = 0;
+    return 1;
+}
+
+void ossl_quic_channel_get_size_probes(QUIC_CHANNEL *ch, uint16_t *confirmed,
+                                       uint64_t *acked)
+{
+    if (confirmed != NULL)
+        *confirmed = ch->size_probe_confirmed;
+    if (acked != NULL)
+        *acked = ch->size_probe_acked;
 }
 
 int ossl_quic_channel_set_peer_addr(QUIC_CHANNEL *ch, const BIO_ADDR *peer_addr)
@@ -994,6 +1026,36 @@ static void ch_rxku_tick(QUIC_CHANNEL *ch)
 }
 
 QUIC_NEEDS_LOCK
+/*
+ * Records the fate of one packet size probe. An acknowledgement proves the path
+ * carried a datagram that large and the peer answered it; the draft has that
+ * confirmation vouch for every smaller size too, which is why confirmed is a
+ * running maximum rather than a per-probe value. A loss or a discarded packet
+ * number space resolves the probe as unconfirmed and sets no bit: it never
+ * proved a size unsupported, it only failed to prove one supported.
+ */
+static void ch_on_size_probe_result(uint16_t idx, uint16_t len, int acked,
+                                    void *arg)
+{
+    QUIC_CHANNEL *ch = arg;
+
+    if (!acked || idx >= ch->num_size_probes)
+        return;
+
+    /*
+     * Report the size the datagram actually came out as, not the size that was
+     * requested. The two are the same unless the padding fell short, and in
+     * that case the peer acknowledged the smaller datagram, so the smaller
+     * number is the one the path is proven to carry.
+     */
+    if (ch->size_probe_sent[idx] != 0)
+        len = ch->size_probe_sent[idx];
+
+    ch->size_probe_acked |= (uint64_t)1 << idx;
+    if (len > ch->size_probe_confirmed)
+        ch->size_probe_confirmed = len;
+}
+
 static void ch_on_txp_ack_tx(const OSSL_QUIC_FRAME_ACK *ack, uint32_t pn_space,
     void *arg)
 {
@@ -2666,6 +2728,78 @@ static void ch_rx_handle_packet(QUIC_CHANNEL *ch, int channel_only)
     }
 }
 
+/*
+ * Send the packet size probes the application asked for, per
+ * draft-seemann-quic-ppdplpmtud. One datagram per size, largest first, each an
+ * Initial packet carrying a PING and padded to that size.
+ *
+ * This runs after the regular flight has been staged and before the flush, so
+ * the ClientHello takes packet number 0 and the probes follow it. That ordering
+ * is deliberate: were the probes first, the acknowledgement of the ClientHello
+ * would carry a larger packet number and immediately declare every probe below
+ * it lost by the packet threshold.
+ *
+ * The campaign is bounded by the lifetime of the Initial packet number space.
+ * A probe not acknowledged before the client sends its first Handshake packet
+ * is discarded with the space and reported unconfirmed, which is honest: an
+ * unacknowledged probe never proved a size unsupported, it only failed to prove
+ * it supported.
+ */
+static void ch_tx_size_probes(QUIC_CHANNEL *ch)
+{
+    size_t saved_mdpl;
+
+    if (ch->num_size_probes == 0
+        || ch->size_probe_next >= ch->num_size_probes
+        || ch->is_server)
+        return;
+
+    /*
+     * Probing needs Initial keys, and nothing to probe once they are gone.
+     */
+    if (!ossl_qtx_is_enc_level_provisioned(ch->qtx, QUIC_ENC_LEVEL_INITIAL))
+        return;
+
+    saved_mdpl = ossl_qtx_get_mdpl(ch->qtx);
+
+    while (ch->size_probe_next < ch->num_size_probes) {
+        size_t len = ch->size_probes[ch->size_probe_next];
+        QUIC_TXP_STATUS status = {0};
+
+        /*
+         * The geometry caps a packet at the maximum datagram payload length, so
+         * without raising it the padding silently falls short of the size being
+         * probed and the measurement would be of the wrong number.
+         */
+        if (!ossl_qtx_set_mdpl(ch->qtx, len))
+            break;
+
+        if (!ossl_quic_tx_packetiser_generate_size_probe(ch->txp, len,
+                (uint16_t)ch->size_probe_next, &status)
+            || status.sent_pkt == 0)
+            break;
+
+        /*
+         * The padding arithmetic leaves no slack, so a datagram that came out
+         * short is a probe of a size nobody asked for. It has already gone into
+         * the queue and will be acknowledged, so the only honest thing is to
+         * record what actually went out rather than what was requested.
+         */
+        ch->size_probe_sent[ch->size_probe_next]
+            = (uint16_t)status.sent_dgram_len;
+
+        ++ch->size_probe_next;
+    }
+
+    /*
+     * Restore on every path out, including the breaks above. Left raised, the
+     * next ordinary CRYPTO packet would be built up to the probe's size and
+     * then fail on any path with less MTU than that - an intermittent,
+     * path-dependent handshake failure that reproduces nowhere convenient.
+     */
+    (void)ossl_qtx_set_mdpl(ch->qtx, saved_mdpl);
+}
+
 /* Try to generate packets and if possible, flush them to the network. */
 static int ch_tx(QUIC_CHANNEL *ch, int *notify_other_threads)
 {
@@ -2761,6 +2895,8 @@ static int ch_tx(QUIC_CHANNEL *ch, int *notify_other_threads)
             break;
         }
     } while (status.sent_pkt > 0);
+
+    ch_tx_size_probes(ch);
 
     /* Flush packets to network. */
     switch (ossl_qtx_flush_net(ch->qtx)) {
@@ -3034,6 +3170,18 @@ static int ch_retry(QUIC_CHANNEL *ch,
     if (!ossl_ackm_mark_packet_pseudo_lost(ch->ackm, QUIC_PN_SPACE_INITIAL,
             pn))
         return 0;
+
+    /*
+     * Only packet number 0 is marked lost above, because that is the only
+     * packet an ordinary client will have sent. Size probes occupy the packet
+     * numbers after it and are stranded under the old Initial keys, which are
+     * replaced below: they can never be acknowledged now. Reset the campaign so
+     * they are sent again alongside the retried ClientHello, rather than
+     * reported as sizes the path would not carry.
+     */
+    ch->size_probe_next = 0;
+    ch->size_probe_acked = 0;
+    ch->size_probe_confirmed = 0;
 
     /*
      * Plug in new secrets for the Initial EL. This is the only time we change

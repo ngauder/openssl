@@ -162,6 +162,15 @@ struct quic_conn_st {
     /* Initial peer L4 address. */
     BIO_ADDR init_peer_addr;
 
+    /*
+     * Packet size probes requested via SSL_set_quic_size_probes, largest first.
+     * Parked on the connection rather than the channel because the setter runs
+     * before the channel exists and without the domain mutex; configure_channel
+     * pushes them down.
+     */
+    uint16_t size_probes[SSL_QUIC_MAX_SIZE_PROBES];
+    size_t num_size_probes;
+
 #ifndef OPENSSL_NO_QUIC_THREAD_ASSIST
     /* Manages thread for QUIC thread assisted mode. */
     QUIC_THREAD_ASSIST thread_assist;

@@ -64,6 +64,9 @@ void ossl_quic_fifd_cleanup(QUIC_FIFD *fifd)
     /* No-op. */
 }
 
+static void fifd_report_size_probe(QUIC_FIFD *fifd, QUIC_TXPIM_PKT *pkt,
+                                   int acked);
+
 static void on_acked(void *arg)
 {
     QUIC_TXPIM_PKT *pkt = arg;
@@ -109,6 +112,7 @@ static void on_acked(void *arg)
         ossl_quic_cfq_release(fifd->cfq, cfq_item);
     }
 
+    fifd_report_size_probe(fifd, pkt, 1);
     ossl_quic_txpim_pkt_release(fifd->txpim, pkt);
 }
 
@@ -226,6 +230,7 @@ static void on_lost(void *arg)
             UINT64_MAX, pkt,
             fifd->regen_frame_arg);
 
+    fifd_report_size_probe(fifd, pkt, 0);
     ossl_quic_txpim_pkt_release(fifd->txpim, pkt);
 }
 
@@ -246,6 +251,7 @@ static void on_discarded(void *arg)
         ossl_quic_cfq_release(fifd->cfq, cfq_item);
     }
 
+    fifd_report_size_probe(fifd, pkt, 0);
     ossl_quic_txpim_pkt_release(fifd->txpim, pkt);
 }
 
@@ -309,6 +315,26 @@ void ossl_quic_fifd_set_qlog_cb(QUIC_FIFD *fifd, QLOG *(*get_qlog_cb)(void *arg)
 {
     fifd->get_qlog_cb = get_qlog_cb;
     fifd->get_qlog_cb_arg = get_qlog_cb_arg;
+}
+
+void ossl_quic_fifd_set_size_probe_cb(QUIC_FIFD *fifd,
+    void (*cb)(uint16_t idx, uint16_t len, int acked, void *arg), void *arg)
+{
+    fifd->size_probe_cb = cb;
+    fifd->size_probe_cb_arg = arg;
+}
+
+/*
+ * Reports a size probe's fate while its record is still intact. Every caller
+ * releases the record immediately afterwards, and the ACK manager reads fields
+ * of it after invoking the callback, so nothing may be deferred past here.
+ */
+static void fifd_report_size_probe(QUIC_FIFD *fifd, QUIC_TXPIM_PKT *pkt,
+                                   int acked)
+{
+    if (pkt->is_size_probe && fifd->size_probe_cb != NULL)
+        fifd->size_probe_cb(pkt->size_probe_idx, pkt->size_probe_len, acked,
+                            fifd->size_probe_cb_arg);
 }
 
 static void txpim_pkt_remove_cfq_item(QUIC_TXPIM_PKT *pkt, QUIC_CFQ_ITEM *cfq_item)

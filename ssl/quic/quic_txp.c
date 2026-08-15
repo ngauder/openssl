@@ -46,7 +46,21 @@
  */
 #define TX_PACKETISER_ARCHETYPE_ACK_ONLY 2
 
-#define TX_PACKETISER_ARCHETYPE_NUM 3
+/*
+ * A packet size probe, per draft-seemann-quic-ppdplpmtud, is different in that:
+ *   - It bypasses CC, but *is* counted as in flight for purposes of CC, so the
+ *     campaign is not gated by the window it is meant to spend;
+ *   - It must be ACK-eliciting, which is what gets the PING in;
+ *   - It carries nothing but that PING and PADDING. Every other permission is
+ *     off, and those zeroes are load-bearing: allow_crypto would let a probe
+ *     pick up pending ClientHello CRYPTO and so make its loss stall the
+ *     handshake, and clearing the rest is what leaves the packet with nothing
+ *     that could be rescheduled under a second packet number -- which would
+ *     break the size-to-packet-number mapping the measurement rests on.
+ */
+#define TX_PACKETISER_ARCHETYPE_SIZE_PROBE 3
+
+#define TX_PACKETISER_ARCHETYPE_NUM 4
 
 struct ossl_quic_tx_packetiser_st {
     OSSL_QUIC_TX_PACKETISER_ARGS args;
@@ -88,6 +102,16 @@ struct ossl_quic_tx_packetiser_st {
 
     /* Has the handshake been completed? */
     unsigned int handshake_complete : 1;
+
+    /*
+     * Internal state - packet size probing. Non-zero only for the duration of a
+     * single ossl_quic_tx_packetiser_generate_size_probe() call. Scoping it to
+     * one call is what makes "left armed by mistake" unrepresentable, which
+     * matters because an armed probe suppresses every other encryption level
+     * and permits nothing but a PING.
+     */
+    size_t size_probe_len;
+    uint16_t size_probe_idx;
 
     OSSL_QUIC_FRAME_CONN_CLOSE conn_close_frame;
 
@@ -725,6 +749,12 @@ void ossl_quic_tx_packetiser_set_qlog_cb(OSSL_QUIC_TX_PACKETISER *txp,
     ossl_quic_fifd_set_qlog_cb(&txp->fifd, get_qlog_cb, get_qlog_cb_arg);
 }
 
+void ossl_quic_tx_packetiser_set_size_probe_cb(OSSL_QUIC_TX_PACKETISER *txp,
+    void (*cb)(uint16_t idx, uint16_t len, int acked, void *arg), void *arg)
+{
+    ossl_quic_fifd_set_size_probe_cb(&txp->fifd, cb, arg);
+}
+
 int ossl_quic_tx_packetiser_discard_enc_level(OSSL_QUIC_TX_PACKETISER *txp,
     uint32_t enc_level)
 {
@@ -928,7 +958,15 @@ int ossl_quic_tx_packetiser_generate(OSSL_QUIC_TX_PACKETISER *txp,
 
     if (need_padding) {
         size_t total_dgram_size = 0;
-        const size_t min_dpl = QUIC_MIN_INITIAL_DGRAM_LEN;
+        /*
+         * A size probe pads to the size being probed rather than to the
+         * mandatory minimum; that padding is what the probe is. The rest of
+         * this block then works unchanged, including the give-up below, which
+         * for a probe means the requested size could not be built -- a clean
+         * failure rather than a short datagram claiming to be a probe.
+         */
+        const size_t min_dpl = txp->size_probe_len > QUIC_MIN_INITIAL_DGRAM_LEN
+            ? txp->size_probe_len : QUIC_MIN_INITIAL_DGRAM_LEN;
         uint32_t pad_el = QUIC_ENC_LEVEL_NUM;
 
         for (enc_level = QUIC_ENC_LEVEL_INITIAL;
@@ -975,6 +1013,13 @@ int ossl_quic_tx_packetiser_generate(OSSL_QUIC_TX_PACKETISER *txp,
             res = 1;
             goto out;
         }
+
+        /*
+         * The datagram's size as this block computed it, which for a size probe
+         * is the whole point. Taken here rather than from the record layer,
+         * whose notion of the current datagram length is not this number.
+         */
+        status->sent_dgram_len = total_dgram_size;
     }
 
     /* 4. Commit */
@@ -1031,6 +1076,32 @@ out:
 
     status->sent_pkt = pkts_done;
 
+    return res;
+}
+
+int ossl_quic_tx_packetiser_generate_size_probe(OSSL_QUIC_TX_PACKETISER *txp,
+                                                size_t dgram_len, uint16_t idx,
+                                                QUIC_TXP_STATUS *status)
+{
+    int res;
+
+    if (dgram_len < QUIC_MIN_INITIAL_DGRAM_LEN)
+        return 0;
+
+    /*
+     * Armed across exactly one generate call and cleared on every return path,
+     * so no ordinary packet can ever be built while probing is in effect. The
+     * caller is responsible for having raised the QTX's maximum datagram
+     * payload length to at least dgram_len, without which the geometry caps the
+     * packet below the size being probed and the padding silently falls short.
+     */
+    txp->size_probe_len = dgram_len;
+    txp->size_probe_idx = idx;
+
+    res = ossl_quic_tx_packetiser_generate(txp, status);
+
+    txp->size_probe_len = 0;
+    txp->size_probe_idx = 0;
     return res;
 }
 
@@ -1097,6 +1168,34 @@ static const struct archetype_data archetypes[QUIC_ENC_LEVEL_NUM][TX_PACKETISER_
             /*require_ack_eliciting           =*/0,
             /*bypass_cc                       =*/1,
         },
+        /* EL 0(INITIAL) - Archetype 3(SIZE_PROBE) */
+        /*
+         * PING and PADDING only. Everything else is off on purpose: see the
+         * archetype's definition above -- allow_crypto in particular would let a
+         * probe carry ClientHello data and so make its loss stall the handshake,
+         * and allow_force_ack_eliciting off stops a probe satisfying a pending
+         * PTO or anti-deadlock request that txp_pkt_commit() would credit it
+         * with.
+         */
+        {
+            /*allow_ack                       =*/0,
+            /*allow_ping                      =*/1,
+            /*allow_crypto                    =*/0,
+            /*allow_handshake_done            =*/0,
+            /*allow_path_challenge            =*/0,
+            /*allow_path_response             =*/0,
+            /*allow_new_conn_id               =*/0,
+            /*allow_retire_conn_id            =*/0,
+            /*allow_stream_rel                =*/0,
+            /*allow_conn_fc                   =*/0,
+            /*allow_conn_close                =*/0,
+            /*allow_cfq_other                 =*/0,
+            /*allow_new_token                 =*/0,
+            /*allow_force_ack_eliciting       =*/0,
+            /*allow_padding                   =*/1,
+            /*require_ack_eliciting           =*/1,
+            /*bypass_cc                       =*/1,
+        },
     },
     /* EL 1(0RTT) */
     {
@@ -1159,6 +1258,31 @@ static const struct archetype_data archetypes[QUIC_ENC_LEVEL_NUM][TX_PACKETISER_
             /*allow_padding                   =*/0,
             /*require_ack_eliciting           =*/0,
             /*bypass_cc                       =*/1,
+        },
+        /* EL 1(0RTT) - Archetype 3(SIZE_PROBE) */
+        /*
+         * Probing only ever runs at the Initial encryption level, so nothing is
+         * permitted here. Left explicit rather than relying on the zero fill, so
+         * a reader of this table can see it was a decision.
+         */
+        {
+            /*allow_ack                       =*/0,
+            /*allow_ping                      =*/0,
+            /*allow_crypto                    =*/0,
+            /*allow_handshake_done            =*/0,
+            /*allow_path_challenge            =*/0,
+            /*allow_path_response             =*/0,
+            /*allow_new_conn_id               =*/0,
+            /*allow_retire_conn_id            =*/0,
+            /*allow_stream_rel                =*/0,
+            /*allow_conn_fc                   =*/0,
+            /*allow_conn_close                =*/0,
+            /*allow_cfq_other                 =*/0,
+            /*allow_new_token                 =*/0,
+            /*allow_force_ack_eliciting       =*/0,
+            /*allow_padding                   =*/0,
+            /*require_ack_eliciting           =*/0,
+            /*bypass_cc                       =*/0,
         },
     },
     /* EL (HANDSHAKE) */
@@ -1223,6 +1347,31 @@ static const struct archetype_data archetypes[QUIC_ENC_LEVEL_NUM][TX_PACKETISER_
             /*require_ack_eliciting           =*/0,
             /*bypass_cc                       =*/1,
         },
+        /* EL 2(HANDSHAKE) - Archetype 3(SIZE_PROBE) */
+        /*
+         * Probing only ever runs at the Initial encryption level, so nothing is
+         * permitted here. Left explicit rather than relying on the zero fill, so
+         * a reader of this table can see it was a decision.
+         */
+        {
+            /*allow_ack                       =*/0,
+            /*allow_ping                      =*/0,
+            /*allow_crypto                    =*/0,
+            /*allow_handshake_done            =*/0,
+            /*allow_path_challenge            =*/0,
+            /*allow_path_response             =*/0,
+            /*allow_new_conn_id               =*/0,
+            /*allow_retire_conn_id            =*/0,
+            /*allow_stream_rel                =*/0,
+            /*allow_conn_fc                   =*/0,
+            /*allow_conn_close                =*/0,
+            /*allow_cfq_other                 =*/0,
+            /*allow_new_token                 =*/0,
+            /*allow_force_ack_eliciting       =*/0,
+            /*allow_padding                   =*/0,
+            /*require_ack_eliciting           =*/0,
+            /*bypass_cc                       =*/0,
+        },
     },
     /* EL 3(1RTT) */
     {
@@ -1285,7 +1434,33 @@ static const struct archetype_data archetypes[QUIC_ENC_LEVEL_NUM][TX_PACKETISER_
             /*allow_padding                   =*/0,
             /*require_ack_eliciting           =*/0,
             /*bypass_cc                       =*/1,
-        } }
+        },
+        /* EL 3(1RTT) - Archetype 3(SIZE_PROBE) */
+        /*
+         * Probing only ever runs at the Initial encryption level, so nothing is
+         * permitted here. Left explicit rather than relying on the zero fill, so
+         * a reader of this table can see it was a decision.
+         */
+        {
+            /*allow_ack                       =*/0,
+            /*allow_ping                      =*/0,
+            /*allow_crypto                    =*/0,
+            /*allow_handshake_done            =*/0,
+            /*allow_path_challenge            =*/0,
+            /*allow_path_response             =*/0,
+            /*allow_new_conn_id               =*/0,
+            /*allow_retire_conn_id            =*/0,
+            /*allow_stream_rel                =*/0,
+            /*allow_conn_fc                   =*/0,
+            /*allow_conn_close                =*/0,
+            /*allow_cfq_other                 =*/0,
+            /*allow_new_token                 =*/0,
+            /*allow_force_ack_eliciting       =*/0,
+            /*allow_padding                   =*/0,
+            /*require_ack_eliciting           =*/0,
+            /*bypass_cc                       =*/0,
+        },
+    }
 };
 
 static int txp_get_archetype_data(uint32_t enc_level,
@@ -1391,6 +1566,15 @@ static uint32_t txp_determine_archetype(OSSL_QUIC_TX_PACKETISER *txp,
     uint32_t pn_space;
 
     /*
+     * A size probe pass takes precedence over everything, including a pending
+     * PTO. It is armed for exactly one generate call and must produce a
+     * datagram of the requested size or none at all, so it cannot share the
+     * datagram with a probe of the other kind.
+     */
+    if (txp->size_probe_len != 0)
+        return TX_PACKETISER_ARCHETYPE_SIZE_PROBE;
+
+    /*
      * If ACKM has requested probe generation (e.g. due to PTO), we generate a
      * Probe-archetype packet. Actually, we determine archetype on a
      * per-datagram basis, so if any EL wants a probe, do a pass in which
@@ -1430,6 +1614,16 @@ static int txp_should_try_staging(OSSL_QUIC_TX_PACKETISER *txp,
 
     if (!ossl_qtx_is_enc_level_provisioned(txp->args.qtx, enc_level))
         return 0;
+
+    /*
+     * A size probe is an Initial-level packet and nothing else. Short-circuit
+     * here rather than relying on the archetype's permissions alone, so that no
+     * other encryption level is staged into the datagram: coalescing would make
+     * the datagram larger than the size being probed and measure something
+     * other than what was asked for.
+     */
+    if (txp->size_probe_len != 0)
+        return enc_level == QUIC_ENC_LEVEL_INITIAL;
 
     if (!txp_get_archetype_data(enc_level, archetype, &a))
         return 0;
@@ -2915,7 +3109,16 @@ static int txp_generate_for_el(OSSL_QUIC_TX_PACKETISER *txp,
     tpkt->ackm_pkt.is_inflight = !can_be_non_inflight;
     tpkt->ackm_pkt.is_ack_eliciting = have_ack_eliciting;
     tpkt->ackm_pkt.is_pto_probe = 0;
-    tpkt->ackm_pkt.is_mtu_probe = 0;
+    /*
+     * is_mtu_probe is what the ACK manager reads to keep an isolated probe loss
+     * from driving a congestion reaction: a probe too large for the path says
+     * nothing about congestion. The TXPIM fields beside it carry the size and
+     * the caller's index, which the ACK manager cannot see.
+     */
+    tpkt->ackm_pkt.is_mtu_probe = (txp->size_probe_len != 0);
+    tpkt->is_size_probe = (txp->size_probe_len != 0);
+    tpkt->size_probe_idx = txp->size_probe_idx;
+    tpkt->size_probe_len = (uint16_t)txp->size_probe_len;
     tpkt->ackm_pkt.time = txp->args.now(txp->args.now_arg);
     tpkt->pkt_type = pkt->phdr.type;
 
