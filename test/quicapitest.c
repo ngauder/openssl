@@ -3582,7 +3582,7 @@ static int test_quic_size_probes(void)
     /* Descending, as the API requires, and well inside a 1500 byte link. */
     static const uint16_t sizes[] = { 1400, 1300, 1250 };
     uint16_t confirmed = 0;
-    uint64_t acked = 0;
+    uint64_t acked = 0, unresolved = 0;
     int ret = 0;
 
     if (!TEST_ptr(cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method())))
@@ -3602,12 +3602,19 @@ static int test_quic_size_probes(void)
     if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
         goto end;
 
-    if (!TEST_true(SSL_get_quic_size_probes(clientquic, &confirmed, &acked)))
+    if (!TEST_true(SSL_get_quic_size_probes(clientquic, &confirmed, &acked,
+                                            &unresolved)))
         goto end;
 
-    /* Every probe should have been acknowledged over a lossless pair. */
+    /*
+     * Every probe should have been acknowledged over a lossless pair, and none
+     * left outstanding when the Initial keys went away. The unresolved check is
+     * the one that would catch the campaign outrunning its own deadline, which
+     * against a real server is what leaves the tail of the ladder untested.
+     */
     if (!TEST_uint_eq((unsigned int)confirmed, 1400)
-        || !TEST_uint64_t_eq(acked, 0x7))
+        || !TEST_uint64_t_eq(acked, 0x7)
+        || !TEST_uint64_t_eq(unresolved, 0))
         goto end;
 
     ret = 1;

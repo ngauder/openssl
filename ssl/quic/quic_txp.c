@@ -750,7 +750,7 @@ void ossl_quic_tx_packetiser_set_qlog_cb(OSSL_QUIC_TX_PACKETISER *txp,
 }
 
 void ossl_quic_tx_packetiser_set_size_probe_cb(OSSL_QUIC_TX_PACKETISER *txp,
-    void (*cb)(uint16_t idx, uint16_t len, int acked, void *arg), void *arg)
+    void (*cb)(uint16_t idx, uint16_t len, int status, void *arg), void *arg)
 {
     ossl_quic_fifd_set_size_probe_cb(&txp->fifd, cb, arg);
 }

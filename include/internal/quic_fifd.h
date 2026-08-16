@@ -53,11 +53,16 @@ struct quic_fifd_st {
      * Reports the fate of a packet size probe, per
      * draft-seemann-quic-ppdplpmtud. Called from the ack, loss and discard
      * paths while the packet record is still intact, since those paths release
-     * it immediately afterwards. acked is 1 on acknowledgement and 0 when the
-     * probe was lost or its packet number space was dropped, which resolves it
-     * as unconfirmed rather than leaving it outstanding forever.
+     * it immediately afterwards.
+     *
+     * status is 1 when the probe was acknowledged, 0 when it was declared
+     * lost, and -1 when its packet number space was discarded with the probe
+     * still outstanding. The last is not the same as the others: the peer
+     * never had the chance to answer, so the size was not tested. The draft
+     * says as much -- a missing acknowledgement does not prove a size is
+     * unsupported -- and it is worth less still when nobody waited for one.
      */
-    void (*size_probe_cb)(uint16_t idx, uint16_t len, int acked, void *arg);
+    void (*size_probe_cb)(uint16_t idx, uint16_t len, int status, void *arg);
     void *size_probe_cb_arg;
 };
 
@@ -99,7 +104,7 @@ void ossl_quic_fifd_set_qlog_cb(QUIC_FIFD *fifd, QLOG *(*get_qlog_cb)(void *arg)
  * pair of arguments to ossl_quic_fifd_init, which already takes twelve.
  */
 void ossl_quic_fifd_set_size_probe_cb(QUIC_FIFD *fifd,
-    void (*cb)(uint16_t idx, uint16_t len, int acked, void *arg), void *arg);
+    void (*cb)(uint16_t idx, uint16_t len, int status, void *arg), void *arg);
 
 void ossl_quic_fifd_pkt_discard_unreliable(QUIC_FIFD *fifd, QUIC_TXPIM_PKT *tpkt);
 #endif

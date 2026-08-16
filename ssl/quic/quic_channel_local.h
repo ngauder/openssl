@@ -198,6 +198,14 @@ struct quic_channel_st {
     size_t num_size_probes;
     size_t size_probe_next;
     uint64_t size_probe_acked;
+    /*
+     * Probes whose packet number space was discarded while they were still
+     * outstanding. The peer never had the chance to answer these, so they say
+     * nothing about the path -- unlike a probe that was declared lost, which
+     * at least had its chance. Kept apart so a measurement can tell the two
+     * cases from each other.
+     */
+    uint64_t size_probe_unresolved;
     uint16_t size_probe_confirmed;
 
     /*

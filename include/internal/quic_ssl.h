@@ -101,7 +101,7 @@ __owur int ossl_quic_conn_set_initial_peer_addr(SSL *s,
 __owur int ossl_quic_conn_set_size_probes(SSL *s, const uint16_t *sizes,
     size_t n);
 __owur int ossl_quic_conn_get_size_probes(SSL *s, uint16_t *confirmed,
-    uint64_t *acked);
+    uint64_t *acked, uint64_t *unresolved);
 __owur SSL *ossl_quic_conn_stream_new(SSL *s, uint64_t flags);
 __owur SSL *ossl_quic_get0_connection(SSL *s);
 __owur SSL *ossl_quic_get0_listener(SSL *s);

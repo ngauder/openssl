@@ -7869,13 +7869,14 @@ int SSL_set_quic_size_probes(SSL *s, const uint16_t *sizes, size_t n)
 #endif
 }
 
-int SSL_get_quic_size_probes(SSL *s, uint16_t *confirmed, uint64_t *acked)
+int SSL_get_quic_size_probes(SSL *s, uint16_t *confirmed, uint64_t *acked,
+                             uint64_t *unresolved)
 {
 #ifndef OPENSSL_NO_QUIC
     if (!IS_QUIC(s))
         return 0;
 
-    return ossl_quic_conn_get_size_probes(s, confirmed, acked);
+    return ossl_quic_conn_get_size_probes(s, confirmed, acked, unresolved);
 #else
     return 0;
 #endif

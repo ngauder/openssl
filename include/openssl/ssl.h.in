@@ -2321,7 +2321,15 @@ __owur int SSL_set1_initial_peer_addr(SSL *s, const BIO_ADDR *peer_addr);
  * SSL_get_quic_size_probes() reports what came back. *confirmed receives the
  * largest acknowledged size, which vouches for every smaller one, or zero if
  * none was acknowledged; *acked receives one bit per requested size, indexed by
- * its position in the array that was set. Either pointer may be NULL.
+ * its position in the array that was set. *unresolved receives a bit per probe
+ * that was still outstanding when its packet number space was discarded: the
+ * peer never had the chance to answer those, so they are not evidence that the
+ * size failed, only that it went untested. Any pointer may be NULL.
+ *
+ * Probing ends when the Initial keys are discarded, and the draft does not have
+ * the sender wait for results -- the handshake must be able to complete whether
+ * or not any probe is acknowledged. A caller that finds sizes unresolved should
+ * ask for fewer of them, which is the draft's own advice.
  *
  * An unacknowledged probe does not prove a size is unsupported. The mechanism
  * finds a confirmed lower bound, not the path MTU.
@@ -2329,7 +2337,7 @@ __owur int SSL_set1_initial_peer_addr(SSL *s, const BIO_ADDR *peer_addr);
 #define SSL_QUIC_MAX_SIZE_PROBES 16
 __owur int SSL_set_quic_size_probes(SSL *s, const uint16_t *sizes, size_t n);
 __owur int SSL_get_quic_size_probes(SSL *s, uint16_t *confirmed,
-                                    uint64_t *acked);
+                                    uint64_t *acked, uint64_t *unresolved);
 
 __owur SSL *SSL_get0_connection(SSL *s);
 __owur int SSL_is_connection(SSL *s);

@@ -36,7 +36,8 @@ OpenSSL Releases
    armed before it is started sends one ACK-eliciting packet per requested
    datagram size alongside its regular first flight, each padded to its size
    with PADDING frames inside the AEAD, and reports which sizes the peer
-   acknowledged.
+   acknowledged, and which were still outstanding when the Initial keys were
+   discarded and so went untested.
 
    *Nikolas Gauder*
 

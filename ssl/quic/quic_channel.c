@@ -97,7 +97,7 @@ static void ch_start_terminating(QUIC_CHANNEL *ch,
     int force_immediate);
 static void ch_on_txp_ack_tx(const OSSL_QUIC_FRAME_ACK *ack, uint32_t pn_space,
     void *arg);
-static void ch_on_size_probe_result(uint16_t idx, uint16_t len, int acked,
+static void ch_on_size_probe_result(uint16_t idx, uint16_t len, int status,
     void *arg);
 static void ch_tx_size_probes(QUIC_CHANNEL *ch);
 static void ch_record_state_transition(QUIC_CHANNEL *ch, uint32_t new_state);
@@ -537,17 +537,20 @@ int ossl_quic_channel_set_size_probes(QUIC_CHANNEL *ch, const uint16_t *sizes,
     ch->num_size_probes = n;
     ch->size_probe_next = 0;
     ch->size_probe_acked = 0;
+    ch->size_probe_unresolved = 0;
     ch->size_probe_confirmed = 0;
     return 1;
 }
 
 void ossl_quic_channel_get_size_probes(QUIC_CHANNEL *ch, uint16_t *confirmed,
-                                       uint64_t *acked)
+                                       uint64_t *acked, uint64_t *unresolved)
 {
     if (confirmed != NULL)
         *confirmed = ch->size_probe_confirmed;
     if (acked != NULL)
         *acked = ch->size_probe_acked;
+    if (unresolved != NULL)
+        *unresolved = ch->size_probe_unresolved;
 }
 
 int ossl_quic_channel_set_peer_addr(QUIC_CHANNEL *ch, const BIO_ADDR *peer_addr)
@@ -1034,12 +1037,29 @@ QUIC_NEEDS_LOCK
  * number space resolves the probe as unconfirmed and sets no bit: it never
  * proved a size unsupported, it only failed to prove one supported.
  */
-static void ch_on_size_probe_result(uint16_t idx, uint16_t len, int acked,
+static void ch_on_size_probe_result(uint16_t idx, uint16_t len, int status,
                                     void *arg)
 {
     QUIC_CHANNEL *ch = arg;
 
-    if (!acked || idx >= ch->num_size_probes)
+    if (idx >= ch->num_size_probes)
+        return;
+
+    /*
+     * status < 0 means the packet number space was discarded with this probe
+     * still outstanding. The draft asks an endpoint to "send probes promptly,
+     * or send fewer of them, to avoid leaving any unsent when keys are
+     * discarded" -- and does not have the sender wait, since the handshake
+     * must be able to complete whether or not any probe is ever acknowledged.
+     * So the honest thing is to record that this size went untested rather
+     * than to report it as one the path would not carry.
+     */
+    if (status < 0) {
+        ch->size_probe_unresolved |= (uint64_t)1 << idx;
+        return;
+    }
+
+    if (status == 0)
         return;
 
     /*
@@ -3181,6 +3201,7 @@ static int ch_retry(QUIC_CHANNEL *ch,
      */
     ch->size_probe_next = 0;
     ch->size_probe_acked = 0;
+    ch->size_probe_unresolved = 0;
     ch->size_probe_confirmed = 0;
 
     /*

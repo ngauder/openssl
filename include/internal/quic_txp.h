@@ -190,7 +190,7 @@ void ossl_quic_tx_packetiser_set_qlog_cb(OSSL_QUIC_TX_PACKETISER *txp,
  * discarded before it resolved.
  */
 void ossl_quic_tx_packetiser_set_size_probe_cb(OSSL_QUIC_TX_PACKETISER *txp,
-    void (*cb)(uint16_t idx, uint16_t len, int acked, void *arg), void *arg);
+    void (*cb)(uint16_t idx, uint16_t len, int status, void *arg), void *arg);
 
 /*
  * Inform the TX packetiser that an EL has been discarded. Idempotent.

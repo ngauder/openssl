@@ -343,7 +343,7 @@ int ossl_quic_channel_set_size_probes(QUIC_CHANNEL *ch, const uint16_t *sizes,
  * position in the array that was set. Either pointer may be NULL.
  */
 void ossl_quic_channel_get_size_probes(QUIC_CHANNEL *ch, uint16_t *confirmed,
-                                       uint64_t *acked);
+                                       uint64_t *acked, uint64_t *unresolved);
 
 /*
  * Returns an existing stream by stream ID. Returns NULL if the stream does not

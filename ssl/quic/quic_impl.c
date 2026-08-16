@@ -1362,7 +1362,7 @@ int ossl_quic_conn_set_size_probes(SSL *s, const uint16_t *sizes, size_t n)
 
 QUIC_TAKES_LOCK
 int ossl_quic_conn_get_size_probes(SSL *s, uint16_t *confirmed,
-                                   uint64_t *acked)
+                                   uint64_t *acked, uint64_t *unresolved)
 {
     QCTX ctx;
 
@@ -1382,8 +1382,11 @@ int ossl_quic_conn_get_size_probes(SSL *s, uint16_t *confirmed,
             *confirmed = 0;
         if (acked != NULL)
             *acked = 0;
+        if (unresolved != NULL)
+            *unresolved = 0;
     } else {
-        ossl_quic_channel_get_size_probes(ctx.qc->ch, confirmed, acked);
+        ossl_quic_channel_get_size_probes(ctx.qc->ch, confirmed, acked,
+                                          unresolved);
     }
 
     qctx_unlock(&ctx);

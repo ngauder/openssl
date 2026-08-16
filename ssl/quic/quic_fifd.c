@@ -65,7 +65,7 @@ void ossl_quic_fifd_cleanup(QUIC_FIFD *fifd)
 }
 
 static void fifd_report_size_probe(QUIC_FIFD *fifd, QUIC_TXPIM_PKT *pkt,
-                                   int acked);
+                                   int status);
 
 static void on_acked(void *arg)
 {
@@ -251,7 +251,7 @@ static void on_discarded(void *arg)
         ossl_quic_cfq_release(fifd->cfq, cfq_item);
     }
 
-    fifd_report_size_probe(fifd, pkt, 0);
+    fifd_report_size_probe(fifd, pkt, -1);
     ossl_quic_txpim_pkt_release(fifd->txpim, pkt);
 }
 
@@ -318,7 +318,7 @@ void ossl_quic_fifd_set_qlog_cb(QUIC_FIFD *fifd, QLOG *(*get_qlog_cb)(void *arg)
 }
 
 void ossl_quic_fifd_set_size_probe_cb(QUIC_FIFD *fifd,
-    void (*cb)(uint16_t idx, uint16_t len, int acked, void *arg), void *arg)
+    void (*cb)(uint16_t idx, uint16_t len, int status, void *arg), void *arg)
 {
     fifd->size_probe_cb = cb;
     fifd->size_probe_cb_arg = arg;
@@ -330,10 +330,10 @@ void ossl_quic_fifd_set_size_probe_cb(QUIC_FIFD *fifd,
  * of it after invoking the callback, so nothing may be deferred past here.
  */
 static void fifd_report_size_probe(QUIC_FIFD *fifd, QUIC_TXPIM_PKT *pkt,
-                                   int acked)
+                                   int status)
 {
     if (pkt->is_size_probe && fifd->size_probe_cb != NULL)
-        fifd->size_probe_cb(pkt->size_probe_idx, pkt->size_probe_len, acked,
+        fifd->size_probe_cb(pkt->size_probe_idx, pkt->size_probe_len, status,
                             fifd->size_probe_cb_arg);
 }
 
