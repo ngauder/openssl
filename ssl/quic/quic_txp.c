@@ -1170,17 +1170,23 @@ static const struct archetype_data archetypes[QUIC_ENC_LEVEL_NUM][TX_PACKETISER_
         },
         /* EL 0(INITIAL) - Archetype 3(SIZE_PROBE) */
         /*
-         * PING and PADDING only. Everything else is off on purpose: see the
-         * archetype's definition above -- allow_crypto in particular would let a
-         * probe carry ClientHello data and so make its loss stall the handshake,
-         * and allow_force_ack_eliciting off stops a probe satisfying a pending
-         * PTO or anti-deadlock request that txp_pkt_commit() would credit it
-         * with.
+         * CRYPTO, PING and PADDING.  The CRYPTO is a copy of the essential
+         * handshake data, which the draft asks for -- and which is not
+         * optional in practice: probes now precede the ClientHello, so a probe
+         * carrying no CRYPTO is the first thing a server sees, and aioquic
+         * closes the connection with PROTOCOL_VIOLATION, "Packet contains no
+         * CRYPTO frame".  The copy is untracked, so losing a probe neither
+         * stalls the handshake nor reschedules anything: see
+         * txp_generate_crypto_frames.
+         *
+         * Everything else stays off.  allow_force_ack_eliciting in particular,
+         * so a probe cannot satisfy a pending PTO or anti-deadlock request
+         * that txp_pkt_commit() would otherwise credit it with.
          */
         {
             /*allow_ack                       =*/0,
             /*allow_ping                      =*/1,
-            /*allow_crypto                    =*/0,
+            /*allow_crypto                    =*/1,
             /*allow_handshake_done            =*/0,
             /*allow_path_challenge            =*/0,
             /*allow_path_response             =*/0,
@@ -2387,6 +2393,20 @@ static int txp_generate_crypto_frames(OSSL_QUIC_TX_PACKETISER *txp,
 
         *have_ack_eliciting = 1;
         tx_helper_unrestrict(h); /* no longer need PING */
+
+        /*
+         * A size probe carries a copy of this data, not the data itself, so it
+         * logs no chunk.  The chunk is what marks the range transmitted -- see
+         * ossl_quic_fifd_pkt_commit -- and what schedules a retransmission if
+         * the packet is lost.  Skipping it leaves the send stream untouched, so
+         * the real handshake packet still goes out afterwards as if the probe
+         * had never read it, and a lost probe reschedules nothing.  That last
+         * part matters beyond tidiness: a probe whose payload came back under a
+         * second packet number would break the size-to-packet-number mapping
+         * the measurement is.
+         */
+        if (txp->size_probe_len != 0)
+            continue;
 
         /* Log chunk to TXPIM. */
         chunk.stream_id = UINT64_MAX; /* crypto stream */
