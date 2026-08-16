@@ -2753,17 +2753,29 @@ static void ch_rx_handle_packet(QUIC_CHANNEL *ch, int channel_only)
  * draft-seemann-quic-ppdplpmtud. One datagram per size, largest first, each an
  * Initial packet carrying a PING and padded to that size.
  *
- * This runs after the regular flight has been staged and before the flush, so
- * the ClientHello takes packet number 0 and the probes follow it. That ordering
- * is deliberate: were the probes first, the acknowledgement of the ClientHello
- * would carry a larger packet number and immediately declare every probe below
- * it lost by the packet threshold.
+ * This runs before the regular flight is staged, so the probes take the lower
+ * packet numbers and the ClientHello follows them. The draft requires that
+ * order -- "an endpoint therefore sends its probes before its essential
+ * handshake data" -- and the reason is the whole measurement.
  *
- * The campaign is bounded by the lifetime of the Initial packet number space.
- * A probe not acknowledged before the client sends its first Handshake packet
- * is discarded with the space and reported unconfirmed, which is honest: an
- * unacknowledged probe never proved a size unsupported, it only failed to prove
- * it supported.
+ * With the ClientHello last it carries the highest packet number of the
+ * flight, so any acknowledgement covering it settles every probe beneath it:
+ * either the peer lists it, or the gap plus packet-threshold detection calls
+ * it lost. A lost probe is a size that did not arrive, which is the answer we
+ * came for.
+ *
+ * The earlier code did the reverse, on the reasoning that an acknowledgement
+ * of the ClientHello would declare the probes lost. It does, and that is the
+ * point: the loss is the signal, and the congestion controller already ignores
+ * it -- see the is_mtu_probe branch in ossl_ackm's loss handling. Sending the
+ * ClientHello first instead gave it the lowest packet number, so the first
+ * acknowledgement came back before the later probes were covered and they
+ * expired unresolved when the keys went. Against the interop servers that lost
+ * the bottom of every ladder.
+ *
+ * The campaign is still bounded by the lifetime of the Initial packet number
+ * space. A probe left outstanding when the keys are discarded is reported
+ * unresolved rather than refused, because it never had its chance.
  */
 static void ch_tx_size_probes(QUIC_CHANNEL *ch)
 {
@@ -2858,6 +2870,13 @@ static int ch_tx(QUIC_CHANNEL *ch, int *notify_other_threads)
 
     ch->rxku_pending_confirm_done = 0;
 
+    /*
+     * Probes go out ahead of the flight, so the ClientHello lands on the higher
+     * packet number and its acknowledgement resolves them. See the comment on
+     * ch_tx_size_probes.
+     */
+    ch_tx_size_probes(ch);
+
     /* Loop until we stop generating packets to send */
     do {
         /*
@@ -2915,8 +2934,6 @@ static int ch_tx(QUIC_CHANNEL *ch, int *notify_other_threads)
             break;
         }
     } while (status.sent_pkt > 0);
-
-    ch_tx_size_probes(ch);
 
     /* Flush packets to network. */
     switch (ossl_qtx_flush_net(ch->qtx)) {
