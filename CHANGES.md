@@ -38,9 +38,10 @@ OpenSSL 4.1
    armed before it is started sends one ACK-eliciting packet per requested
    datagram size alongside its regular first flight, each padded to its size
    with PADDING frames inside the AEAD, and reports which sizes the peer
-   acknowledged. Ported from `quic-size-probes` (on 4.0.1) so that the
-   probes can run beside `SSL_VALUE_QUIC_UDP_PAYLOAD_SIZE_MAX`, which 4.1
-   adds.
+   acknowledged, and which were still outstanding when the Initial keys were
+   discarded and so went untested. Ported from `quic-size-probes` (on 4.0.1)
+   so that the probes can run beside `SSL_VALUE_QUIC_UDP_PAYLOAD_SIZE_MAX`,
+   which 4.1 adds.
 
    *Nikolas Gauder*
 
