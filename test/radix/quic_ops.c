@@ -233,6 +233,18 @@ DEF_FUNC(hf_new_ssl)
     } else if (is_server) {
         if (!TEST_ptr(ssl = SSL_new_listener(ctx, 0)))
             goto err;
+        /*
+         * The interpreter polls: every op is retried until it succeeds, and
+         * all objects are ticked and the clock advanced between tries. A
+         * blocking call on the server side would stop that, so if it waits
+         * for anything the client still has to send or retransmit, it
+         * never returns. Connections accepted from the listener inherit
+         * this.
+         */
+        if (!TEST_true(SSL_set_blocking_mode(ssl, 0))) {
+            SSL_free(ssl);
+            goto err;
+        }
     } else {
         if (!TEST_ptr(ssl = SSL_new(ctx)))
             goto err;
@@ -274,6 +286,11 @@ DEF_FUNC(hf_new_ssl_listener_from)
 
     if (!TEST_ptr(listener = SSL_new_listener_from(domain, flags)))
         goto err;
+    /* See hf_new_ssl(). */
+    if (!TEST_true(SSL_set_blocking_mode(listener, 0))) {
+        SSL_free(listener);
+        goto err;
+    }
 
     if (!TEST_true(ssl_attach_bio_dgram(listener, 0, NULL)))
         goto err;
@@ -341,6 +358,13 @@ DEF_FUNC(hf_new_stream)
             F_SPIN_AGAIN();
     } else {
         stream = SSL_new_stream(conn, flags & OP_F_MASK);
+        /* Wait for stream credit, as a blocking SSL_new_stream() would. */
+        if (stream == NULL && (flags & SSL_STREAM_FLAG_NO_BLOCK) == 0
+            && ERR_GET_REASON(ERR_peek_last_error())
+                == SSL_R_STREAM_COUNT_LIMITED) {
+            ERR_clear_error();
+            F_SPIN_AGAIN();
+        }
     }
 
     if (!TEST_ptr(stream))
@@ -577,8 +601,13 @@ DEF_FUNC(hf_write)
     REQUIRE_SSL(ssl);
 
     r = SSL_write_ex(ssl, buf, buf_len, &bytes_written);
+    if (!TEST_true(check_consistent_want(ssl, r)))
+        goto err;
+
+    if (!r && is_want(ssl, r))
+        F_SPIN_AGAIN();
+
     if (!TEST_true(r)
-        || !check_consistent_want(ssl, r)
         || !TEST_size_t_eq(bytes_written, buf_len))
         goto err;
 
@@ -634,8 +663,13 @@ DEF_FUNC(hf_write_ex2)
     REQUIRE_SSL(ssl);
 
     r = SSL_write_ex2(ssl, buf, buf_len, flags, &bytes_written);
+    if (!TEST_true(check_consistent_want(ssl, r)))
+        goto err;
+
+    if (!r && is_want(ssl, r))
+        F_SPIN_AGAIN();
+
     if (!TEST_true(r)
-        || !check_consistent_want(ssl, r)
         || !TEST_size_t_eq(bytes_written, buf_len))
         goto err;
 
