@@ -4488,6 +4488,72 @@ end:
     return ret;
 }
 
+/*
+ * The 1-RTT campaign: refused before the handshake is complete, sent and
+ * acknowledged after it, attributed to the right entry of the caller's list,
+ * and refused a second time on the same connection. Over a lossless pair every
+ * size is acknowledged and none is lost; that the lost bitmap stays empty is
+ * the check that acknowledgements are not being misread as losses.
+ */
+static int test_quic_size_probes_1rtt(void)
+{
+    SSL_CTX *cctx = NULL;
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    static const uint16_t sizes[] = { 1400, 1300, 1200 };
+    uint64_t acked = 0, lost = 0, unresolved = 0;
+    int i, ret = 0;
+
+    if (!TEST_ptr(cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method())))
+        goto end;
+
+    if (!TEST_true(qtest_create_quic_objects(libctx, cctx, NULL,
+            cert, privkey, 0,
+            &qtserv, &clientquic,
+            NULL, NULL)))
+        goto end;
+
+    /* Not before the handshake: there are no 1-RTT keys to send under. */
+    if (!TEST_false(SSL_send_quic_size_probes_1rtt(clientquic, sizes,
+            OSSL_NELEM(sizes))))
+        goto end;
+
+    if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+        goto end;
+
+    if (!TEST_true(SSL_send_quic_size_probes_1rtt(clientquic, sizes,
+            OSSL_NELEM(sizes))))
+        goto end;
+
+    /* Once per connection, so the bitmaps describe exactly one list. */
+    if (!TEST_false(SSL_send_quic_size_probes_1rtt(clientquic, sizes,
+            OSSL_NELEM(sizes))))
+        goto end;
+
+    for (i = 0; i < 100 && acked != 0x7; i++) {
+        SSL_handle_events(clientquic);
+        ossl_quic_tserver_tick(qtserv);
+        SSL_handle_events(clientquic);
+        if (!TEST_true(SSL_get_quic_size_probes_1rtt(clientquic, &acked, &lost,
+                                                     &unresolved)))
+            goto end;
+        qtest_add_time(1);
+        qtest_wait_for_timeout(clientquic, qtserv);
+    }
+
+    if (!TEST_uint64_t_eq(acked, 0x7)
+        || !TEST_uint64_t_eq(lost, 0)
+        || !TEST_uint64_t_eq(unresolved, 0))
+        goto end;
+
+    ret = 1;
+end:
+    ossl_quic_tserver_free(qtserv);
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+    return ret;
+}
+
 /***********************************************************************************/
 OPT_TEST_DECLARE_USAGE("provider config certsdir datadir\n")
 
@@ -4609,6 +4675,7 @@ int setup_tests(void)
     ADD_TEST(test_pending_limit);
     ADD_TEST(test_quic_size_probes);
     ADD_TEST(test_quic_size_probes_reject);
+    ADD_TEST(test_quic_size_probes_1rtt);
 
     return 1;
 err:

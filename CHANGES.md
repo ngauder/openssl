@@ -53,6 +53,16 @@ OpenSSL 4.1
 
    *Nikolas Gauder*
 
+ * Added `SSL_send_quic_size_probes_1rtt()` and
+   `SSL_get_quic_size_probes_1rtt()`, ordinals 632 and 633. Once the handshake
+   is complete, a client sends one 1-RTT PING padded to each requested size and
+   reports which were acknowledged, declared lost, or left unresolved. An
+   Initial probe shows the path carried the size and the server answered it
+   during the handshake; these show whether the connection accepts the size
+   afterwards.
+
+   *Nikolas Gauder*
+
 ### Changes between 4.0 and 4.1 beta 1 [23 Sep 2026]
 
  * Added support for DTLS 1.3 ([RFC 9147]).

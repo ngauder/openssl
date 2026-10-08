@@ -361,6 +361,24 @@ void ossl_quic_channel_get_size_probes(QUIC_CHANNEL *ch, uint16_t *confirmed,
                                        uint64_t *acked, uint64_t *unresolved);
 
 /*
+ * Arms a second, 1-RTT campaign of packet size probes on a client whose
+ * handshake is complete. Sizes are UDP payload bytes, largest first, validated
+ * by the caller. Once per connection: a second call fails, so the bitmaps can
+ * only ever describe one list of sizes. The probes go out on the next tick.
+ */
+int ossl_quic_channel_send_size_probes_1rtt(QUIC_CHANNEL *ch,
+                                            const uint16_t *sizes, size_t n);
+
+/*
+ * Reports the 1-RTT campaign: one bit per requested size in each of acked,
+ * lost and unresolved, indexed by position in the array that was sent. A size
+ * in none of the three is still outstanding. Any pointer may be NULL.
+ */
+void ossl_quic_channel_get_size_probes_1rtt(QUIC_CHANNEL *ch, uint64_t *acked,
+                                            uint64_t *lost,
+                                            uint64_t *unresolved);
+
+/*
  * Returns an existing stream by stream ID. Returns NULL if the stream does not
  * exist.
  */

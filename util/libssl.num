@@ -628,3 +628,5 @@ SSL_get0_sigalg                         627	4_0_0	EXIST::FUNCTION:
 SSL_get0_shared_sigalg                  628	4_0_0	EXIST::FUNCTION:
 SSL_set_quic_size_probes                630	4_1_0	EXIST::FUNCTION:
 SSL_get_quic_size_probes                631	4_1_0	EXIST::FUNCTION:
+SSL_send_quic_size_probes_1rtt          632	4_1_0	EXIST::FUNCTION:
+SSL_get_quic_size_probes_1rtt           633	4_1_0	EXIST::FUNCTION:

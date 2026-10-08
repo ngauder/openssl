@@ -118,17 +118,21 @@ int ossl_quic_tx_packetiser_generate(OSSL_QUIC_TX_PACKETISER *txp,
 
 /*
  * Generates a single packet size probe datagram of exactly dgram_len bytes, per
- * draft-seemann-quic-ppdplpmtud: an Initial packet carrying a PING frame and
- * PADDING frames to reach that size, with its own packet number. idx is the
- * probe's position in the caller's list of sizes, reported back with the
- * acknowledgement so the caller can index its own array.
+ * draft-seemann-quic-ppdplpmtud: a packet carrying a PING frame and PADDING
+ * frames to reach that size, with its own packet number. enc_level is
+ * QUIC_ENC_LEVEL_INITIAL for the probes that ride with the first flight (which
+ * also carry a copy of the ClientHello) or QUIC_ENC_LEVEL_1RTT for probes sent
+ * once the handshake is done. idx is the probe's position in the caller's list
+ * of sizes, reported back with the acknowledgement so the caller can index its
+ * own array.
  *
  * The caller must first raise the QTX's maximum datagram payload length to at
  * least dgram_len, and must restore it afterwards: left raised, it lets the
  * next ordinary CRYPTO packet grow beyond the size the path was tested at.
  */
 int ossl_quic_tx_packetiser_generate_size_probe(OSSL_QUIC_TX_PACKETISER *txp,
-    size_t dgram_len, uint16_t idx, QUIC_TXP_STATUS *status);
+    uint32_t enc_level, size_t dgram_len, uint16_t idx,
+    QUIC_TXP_STATUS *status);
 
 /*
  * Returns a deadline after which a call to ossl_quic_tx_packetiser_generate()

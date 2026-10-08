@@ -1404,6 +1404,81 @@ int ossl_quic_conn_get_size_probes(SSL *s, uint16_t *confirmed,
     return 1;
 }
 
+QUIC_TAKES_LOCK
+int ossl_quic_conn_send_size_probes_1rtt(SSL *s, const uint16_t *sizes,
+                                         size_t n)
+{
+    QCTX ctx;
+    size_t i;
+    int ret;
+
+    if (!expect_quic_conn_only(s, &ctx))
+        return 0;
+
+    if (ctx.qc->as_server)
+        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx,
+            ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED, NULL);
+
+    if (sizes == NULL || n == 0 || n > SSL_QUIC_MAX_SIZE_PROBES)
+        return QUIC_RAISE_NON_NORMAL_ERROR(&ctx, ERR_R_PASSED_INVALID_ARGUMENT,
+            NULL);
+
+    /*
+     * The same rules as the Initial campaign, for the same reasons: nothing
+     * below the minimum datagram size, and largest first so that the smaller
+     * probes' acknowledgements resolve the larger ones.
+     */
+    for (i = 0; i < n; ++i) {
+        if (sizes[i] < QUIC_MIN_INITIAL_DGRAM_LEN
+            || (i > 0 && sizes[i] >= sizes[i - 1]))
+            return QUIC_RAISE_NON_NORMAL_ERROR(&ctx,
+                ERR_R_PASSED_INVALID_ARGUMENT, NULL);
+    }
+
+    qctx_lock(&ctx);
+
+    /*
+     * Fails before the handshake is complete, after the connection has started
+     * to close, and on a second call.
+     */
+    if (ctx.qc->ch == NULL
+        || !ossl_quic_channel_send_size_probes_1rtt(ctx.qc->ch, sizes, n))
+        ret = QUIC_RAISE_NON_NORMAL_ERROR(&ctx,
+            ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED, NULL);
+    else
+        ret = 1;
+
+    qctx_unlock(&ctx);
+    return ret;
+}
+
+QUIC_TAKES_LOCK
+int ossl_quic_conn_get_size_probes_1rtt(SSL *s, uint64_t *acked,
+                                        uint64_t *lost, uint64_t *unresolved)
+{
+    QCTX ctx;
+
+    if (!expect_quic_conn_only(s, &ctx))
+        return 0;
+
+    qctx_lock(&ctx);
+
+    if (ctx.qc->ch == NULL) {
+        if (acked != NULL)
+            *acked = 0;
+        if (lost != NULL)
+            *lost = 0;
+        if (unresolved != NULL)
+            *unresolved = 0;
+    } else {
+        ossl_quic_channel_get_size_probes_1rtt(ctx.qc->ch, acked, lost,
+                                               unresolved);
+    }
+
+    qctx_unlock(&ctx);
+    return 1;
+}
+
 /*
  * QUIC Front-End I/O API: Asynchronous I/O Management
  * ===================================================

@@ -2348,6 +2348,35 @@ __owur int SSL_set_quic_size_probes(SSL *s, const uint16_t *sizes, size_t n);
 __owur int SSL_get_quic_size_probes(SSL *s, uint16_t *confirmed,
                                     uint64_t *acked, uint64_t *unresolved);
 
+/*
+ * The same probes again at the 1-RTT level, once the handshake is complete.
+ *
+ * An Initial probe that is acknowledged shows the path carried a datagram of
+ * that size and the peer answered it during the handshake. It does not show
+ * that the connection accepts one afterwards: an Initial can be handled by a
+ * different part of the server than the connection's own packets, and a server
+ * that advertised a max_udp_payload_size below the size may enforce it only
+ * there. SSL_send_quic_size_probes_1rtt() sends one short-header packet per
+ * requested size, each a PING padded to that size, on the next call that
+ * services the connection. Sizes follow the same rules as
+ * SSL_set_quic_size_probes(). The last size should be one the connection is
+ * known to accept, so its acknowledgement resolves the others. Callable once
+ * per connection, on a client whose handshake is complete.
+ *
+ * Sending a size above the peer's max_udp_payload_size is the caller's
+ * decision; the library does not hold it back, since testing that size is what
+ * the call is for.
+ *
+ * SSL_get_quic_size_probes_1rtt() reports one bit per requested size in each of
+ * *acked, *lost (declared lost by loss detection) and *unresolved (not sent at
+ * the requested size, or still outstanding when the connection ended). A size
+ * in none of them is still outstanding. Any pointer may be NULL.
+ */
+__owur int SSL_send_quic_size_probes_1rtt(SSL *s, const uint16_t *sizes,
+                                          size_t n);
+__owur int SSL_get_quic_size_probes_1rtt(SSL *s, uint64_t *acked,
+                                         uint64_t *lost, uint64_t *unresolved);
+
 __owur SSL *SSL_get0_connection(SSL *s);
 __owur int SSL_is_connection(SSL *s);
 

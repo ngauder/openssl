@@ -8170,6 +8170,31 @@ int SSL_get_quic_size_probes(SSL *s, uint16_t *confirmed, uint64_t *acked,
 #endif
 }
 
+int SSL_send_quic_size_probes_1rtt(SSL *s, const uint16_t *sizes, size_t n)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return 0;
+
+    return ossl_quic_conn_send_size_probes_1rtt(s, sizes, n);
+#else
+    return 0;
+#endif
+}
+
+int SSL_get_quic_size_probes_1rtt(SSL *s, uint64_t *acked, uint64_t *lost,
+                                  uint64_t *unresolved)
+{
+#ifndef OPENSSL_NO_QUIC
+    if (!IS_QUIC(s))
+        return 0;
+
+    return ossl_quic_conn_get_size_probes_1rtt(s, acked, lost, unresolved);
+#else
+    return 0;
+#endif
+}
+
 int SSL_shutdown_ex(SSL *ssl, uint64_t flags,
     const SSL_SHUTDOWN_EX_ARGS *args,
     size_t args_len)

@@ -109,9 +109,14 @@ struct ossl_quic_tx_packetiser_st {
      * one call is what makes "left armed by mistake" unrepresentable, which
      * matters because an armed probe suppresses every other encryption level
      * and permits nothing but a PING.
+     *
+     * size_probe_el is the encryption level the probe is built at: Initial for
+     * the probes that ride with the first flight, 1-RTT for those sent once the
+     * handshake is done to test whether the size still holds there.
      */
     size_t size_probe_len;
     uint16_t size_probe_idx;
+    uint32_t size_probe_el;
 
     OSSL_QUIC_FRAME_CONN_CLOSE conn_close_frame;
 
@@ -968,6 +973,14 @@ int ossl_quic_tx_packetiser_generate(OSSL_QUIC_TX_PACKETISER *txp,
          */
         need_padding = 1;
 
+    /*
+     * A size probe is padded whatever its level. At the Initial level the rule
+     * above already asks for it; a 1-RTT probe would otherwise go out as a bare
+     * PING, a few dozen bytes claiming to be a probe of the size requested.
+     */
+    if (txp->size_probe_len != 0)
+        need_padding = 1;
+
     if (need_padding) {
         size_t total_dgram_size = 0;
         /*
@@ -1092,12 +1105,20 @@ out:
 }
 
 int ossl_quic_tx_packetiser_generate_size_probe(OSSL_QUIC_TX_PACKETISER *txp,
+                                                uint32_t enc_level,
                                                 size_t dgram_len, uint16_t idx,
                                                 QUIC_TXP_STATUS *status)
 {
     int res;
 
     if (dgram_len < QUIC_MIN_INITIAL_DGRAM_LEN)
+        return 0;
+
+    /*
+     * Only the two levels whose SIZE_PROBE archetype permits a PING and
+     * PADDING. A probe at any other level would come out as nothing at all.
+     */
+    if (enc_level != QUIC_ENC_LEVEL_INITIAL && enc_level != QUIC_ENC_LEVEL_1RTT)
         return 0;
 
     /*
@@ -1109,11 +1130,13 @@ int ossl_quic_tx_packetiser_generate_size_probe(OSSL_QUIC_TX_PACKETISER *txp,
      */
     txp->size_probe_len = dgram_len;
     txp->size_probe_idx = idx;
+    txp->size_probe_el = enc_level;
 
     res = ossl_quic_tx_packetiser_generate(txp, status);
 
     txp->size_probe_len = 0;
     txp->size_probe_idx = 0;
+    txp->size_probe_el = 0;
     return res;
 }
 
@@ -1455,13 +1478,17 @@ static const struct archetype_data archetypes[QUIC_ENC_LEVEL_NUM][TX_PACKETISER_
         },
         /* EL 3(1RTT) - Archetype 3(SIZE_PROBE) */
         /*
-         * Probing only ever runs at the Initial encryption level, so nothing is
-         * permitted here. Left explicit rather than relying on the zero fill, so
-         * a reader of this table can see it was a decision.
+         * PING and PADDING only: a probe sent once the handshake is done, to
+         * find out whether a size acknowledged at the Initial level is still
+         * accepted on the connection itself. The draft's own 1-RTT probes are
+         * built the same way. No CRYPTO here, unlike the Initial row -- there is
+         * no handshake data left to copy, and nothing else may ride along, for
+         * the same reason as there: a frame that could be rescheduled would
+         * break the size-to-packet-number mapping.
          */
         {
             /*allow_ack                       =*/0,
-            /*allow_ping                      =*/0,
+            /*allow_ping                      =*/1,
             /*allow_crypto                    =*/0,
             /*allow_handshake_done            =*/0,
             /*allow_path_challenge            =*/0,
@@ -1474,9 +1501,9 @@ static const struct archetype_data archetypes[QUIC_ENC_LEVEL_NUM][TX_PACKETISER_
             /*allow_cfq_other                 =*/0,
             /*allow_new_token                 =*/0,
             /*allow_force_ack_eliciting       =*/0,
-            /*allow_padding                   =*/0,
-            /*require_ack_eliciting           =*/0,
-            /*bypass_cc                       =*/0,
+            /*allow_padding                   =*/1,
+            /*require_ack_eliciting           =*/1,
+            /*bypass_cc                       =*/1,
         },
     }
 };
@@ -1634,14 +1661,14 @@ static int txp_should_try_staging(OSSL_QUIC_TX_PACKETISER *txp,
         return 0;
 
     /*
-     * A size probe is an Initial-level packet and nothing else. Short-circuit
-     * here rather than relying on the archetype's permissions alone, so that no
-     * other encryption level is staged into the datagram: coalescing would make
-     * the datagram larger than the size being probed and measure something
-     * other than what was asked for.
+     * A size probe is a packet at its own encryption level and nothing else.
+     * Short-circuit here rather than relying on the archetype's permissions
+     * alone, so that no other encryption level is staged into the datagram:
+     * coalescing would make the datagram larger than the size being probed and
+     * measure something other than what was asked for.
      */
     if (txp->size_probe_len != 0)
-        return enc_level == QUIC_ENC_LEVEL_INITIAL;
+        return enc_level == txp->size_probe_el;
 
     if (!txp_get_archetype_data(enc_level, archetype, &a))
         return 0;

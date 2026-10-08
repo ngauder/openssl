@@ -92,6 +92,14 @@ static void ch_on_txp_ack_tx(const OSSL_QUIC_FRAME_ACK *ack, uint32_t pn_space,
 static void ch_on_size_probe_result(uint16_t idx, uint16_t len, int status,
     void *arg);
 static void ch_tx_size_probes(QUIC_CHANNEL *ch);
+static void ch_tx_size_probes_1rtt(QUIC_CHANNEL *ch);
+
+/*
+ * A probe's index travels through the packet record with this bit set when it
+ * belongs to the 1-RTT campaign, so one callback can tell the two apart. The
+ * index itself never reaches it: SSL_QUIC_MAX_SIZE_PROBES is far below.
+ */
+#define CH_SIZE_PROBE_IDX_1RTT 0x8000
 static void ch_record_state_transition(QUIC_CHANNEL *ch, uint32_t new_state);
 
 DEFINE_LHASH_OF_EX(QUIC_SRT_ELEM);
@@ -575,6 +583,37 @@ void ossl_quic_channel_get_size_probes(QUIC_CHANNEL *ch, uint16_t *confirmed,
         *acked = ch->size_probe_acked;
     if (unresolved != NULL)
         *unresolved = ch->size_probe_unresolved;
+}
+
+int ossl_quic_channel_send_size_probes_1rtt(QUIC_CHANNEL *ch,
+                                            const uint16_t *sizes, size_t n)
+{
+    if (ch->is_server || !ch->handshake_complete
+        || !ossl_quic_channel_is_active(ch))
+        return 0;
+
+    if (n == 0 || n > SSL_QUIC_MAX_SIZE_PROBES || ch->num_size_probes_1rtt != 0)
+        return 0;
+
+    memcpy(ch->size_probes_1rtt, sizes, n * sizeof(*sizes));
+    ch->num_size_probes_1rtt = n;
+    ch->size_probe_1rtt_next = 0;
+    ch->size_probe_1rtt_acked = 0;
+    ch->size_probe_1rtt_lost = 0;
+    ch->size_probe_1rtt_unresolved = 0;
+    return 1;
+}
+
+void ossl_quic_channel_get_size_probes_1rtt(QUIC_CHANNEL *ch, uint64_t *acked,
+                                            uint64_t *lost,
+                                            uint64_t *unresolved)
+{
+    if (acked != NULL)
+        *acked = ch->size_probe_1rtt_acked;
+    if (lost != NULL)
+        *lost = ch->size_probe_1rtt_lost;
+    if (unresolved != NULL)
+        *unresolved = ch->size_probe_1rtt_unresolved;
 }
 
 int ossl_quic_channel_set_peer_addr(QUIC_CHANNEL *ch, const BIO_ADDR *peer_addr)
@@ -1064,6 +1103,27 @@ static void ch_on_size_probe_result(uint16_t idx, uint16_t len, int status,
                                     void *arg)
 {
     QUIC_CHANNEL *ch = arg;
+
+    /*
+     * A 1-RTT probe. Unlike an Initial one, a loss is recorded: the connection
+     * is established, the peer has its keys, and a probe declared lost while
+     * the ones around it were acknowledged is a size the connection did not
+     * accept. Whether that is the path or the peer is for the caller to work
+     * out from the Initial result for the same size.
+     */
+    if ((idx & CH_SIZE_PROBE_IDX_1RTT) != 0) {
+        idx &= ~CH_SIZE_PROBE_IDX_1RTT;
+        if (idx >= ch->num_size_probes_1rtt
+            || (ch->size_probe_1rtt_unresolved & ((uint64_t)1 << idx)) != 0)
+            return;
+        if (status > 0)
+            ch->size_probe_1rtt_acked |= (uint64_t)1 << idx;
+        else if (status == 0)
+            ch->size_probe_1rtt_lost |= (uint64_t)1 << idx;
+        else
+            ch->size_probe_1rtt_unresolved |= (uint64_t)1 << idx;
+        return;
+    }
 
     if (idx >= ch->num_size_probes)
         return;
@@ -2840,7 +2900,8 @@ static void ch_tx_size_probes(QUIC_CHANNEL *ch)
         if (!ossl_qtx_set_mdpl(ch->qtx, len))
             break;
 
-        if (!ossl_quic_tx_packetiser_generate_size_probe(ch->txp, len,
+        if (!ossl_quic_tx_packetiser_generate_size_probe(ch->txp,
+                QUIC_ENC_LEVEL_INITIAL, len,
                 (uint16_t)ch->size_probe_next, &status)
             || status.sent_pkt == 0)
             break;
@@ -2863,6 +2924,70 @@ static void ch_tx_size_probes(QUIC_CHANNEL *ch)
      * then fail on any path with less MTU than that - an intermittent,
      * path-dependent handshake failure that reproduces nowhere convenient.
      */
+    (void)ossl_qtx_set_mdpl(ch->qtx, saved_mdpl);
+}
+
+/*
+ * Send the 1-RTT size probes armed by ossl_quic_channel_send_size_probes_1rtt:
+ * one datagram per size, in the caller's order, each a short-header packet
+ * carrying a PING and padded to that size.
+ *
+ * The caller is expected to put the sizes largest first and to end with one it
+ * knows the connection accepts. That last probe carries the highest packet
+ * number, so its acknowledgement settles every probe beneath it through
+ * packet-threshold or time-threshold loss detection, the same reason the
+ * Initial campaign sends its probes ahead of the ClientHello.
+ *
+ * Nothing here is held back for the peer's max_udp_payload_size. Testing a
+ * size above it is the point of the measurement, and it is the caller's
+ * request, not something the stack would choose to send.
+ */
+static void ch_tx_size_probes_1rtt(QUIC_CHANNEL *ch)
+{
+    size_t saved_mdpl;
+
+    if (ch->num_size_probes_1rtt == 0
+        || ch->size_probe_1rtt_next >= ch->num_size_probes_1rtt
+        || ch->is_server
+        || !ch->handshake_complete)
+        return;
+
+    if (!ossl_qtx_is_enc_level_provisioned(ch->qtx, QUIC_ENC_LEVEL_1RTT))
+        return;
+
+    saved_mdpl = ossl_qtx_get_mdpl(ch->qtx);
+
+    while (ch->size_probe_1rtt_next < ch->num_size_probes_1rtt) {
+        size_t len = ch->size_probes_1rtt[ch->size_probe_1rtt_next];
+        QUIC_TXP_STATUS status = {0};
+
+        if (!ossl_qtx_set_mdpl(ch->qtx, len))
+            break;
+
+        if (!ossl_quic_tx_packetiser_generate_size_probe(ch->txp,
+                QUIC_ENC_LEVEL_1RTT, len,
+                (uint16_t)(ch->size_probe_1rtt_next | CH_SIZE_PROBE_IDX_1RTT),
+                &status)
+            || status.sent_pkt == 0)
+            break;
+
+        /*
+         * A short datagram is not a probe of this size. It has already gone
+         * into the queue, so mark it unresolved -- the callback then ignores
+         * its fate -- and stop: the sizes after it go unsent, and the caller
+         * sees them in none of the three bitmaps.
+         */
+        if (status.sent_dgram_len != len) {
+            ch->size_probe_1rtt_unresolved
+                |= (uint64_t)1 << ch->size_probe_1rtt_next;
+            ch->size_probe_1rtt_next = ch->num_size_probes_1rtt;
+            break;
+        }
+
+        ++ch->size_probe_1rtt_next;
+    }
+
+    /* Restored on every path out, as for the Initial campaign. */
     (void)ossl_qtx_set_mdpl(ch->qtx, saved_mdpl);
 }
 
@@ -2910,6 +3035,7 @@ static int ch_tx(QUIC_CHANNEL *ch, int *notify_other_threads)
      * ch_tx_size_probes.
      */
     ch_tx_size_probes(ch);
+    ch_tx_size_probes_1rtt(ch);
 
     /* Loop until we stop generating packets to send */
     do {

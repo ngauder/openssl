@@ -228,6 +228,23 @@ struct quic_channel_st {
     uint16_t size_probe_confirmed;
 
     /*
+     * The same again for probes sent at the 1-RTT level once the handshake is
+     * done, requested with SSL_send_quic_size_probes_1rtt. They test whether a
+     * size acknowledged at the Initial level is still accepted on the
+     * connection itself, which the Initial probes cannot say: an Initial may be
+     * handled by a different part of the server than the connection's own
+     * packets. Kept apart from the Initial campaign so neither result can
+     * overwrite the other, and with a lost bitmap of its own: here a loss is
+     * the answer, where at the Initial level it was only the absence of one.
+     */
+    uint16_t size_probes_1rtt[SSL_QUIC_MAX_SIZE_PROBES];
+    size_t num_size_probes_1rtt;
+    size_t size_probe_1rtt_next;
+    uint64_t size_probe_1rtt_acked;
+    uint64_t size_probe_1rtt_lost;
+    uint64_t size_probe_1rtt_unresolved;
+
+    /*
      * Temporary staging area to store information about the incoming packet we
      * are currently processing.
      */
