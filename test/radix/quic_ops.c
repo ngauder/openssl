@@ -1619,6 +1619,8 @@ DEF_FUNC(hf_set_inject_handshake_cb)
     OPENSSL_free(radix_fault.handbuf);
     radix_fault.handbuf = NULL;
     radix_fault.handbuflen = 0;
+    /* Don't inherit inject words from a previous script. */
+    radix_fault.word0 = radix_fault.word1 = 0;
     radix_fault.hcb = radix_fault_ptr_to_handshake_cb(cbptr);
 
     ok = 1;
@@ -1639,6 +1641,8 @@ DEF_FUNC(hf_set_inject_handshake)
     radix_fault.handbuf = NULL;
     radix_fault.handbuflen = 0;
     radix_fault.handbufalloc = 0;
+    /* Don't inherit inject words from a previous script. */
+    radix_fault.word0 = radix_fault.word1 = 0;
     radix_fault.hcb = radix_fault_ptr_to_handshake_cb(cbptr);
 
     if (!TEST_true(ossl_statem_set_mutator(ssl, radix_fault_handshake_mutate,
